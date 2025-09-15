@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>CD Maker · YouTube → MP3/WAV</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="wrap">
+    <header class="stack">
+      <h1>CD Maker</h1>
+      <p class="subtle">Paste a YouTube link. Pick <strong>Add To CD</strong>, or get a one-off <strong>MP3</strong>/<strong>WAV</strong> download.</p>
+    </header>
+
+    <section class="panel">
+      <div class="row" style="align-items:flex-start; gap:12px;">
+        <div style="flex:1;">
+          <input id="url" class="input" placeholder="https://www.youtube.com/watch?v=…" />
+          <div class="row" style="margin-top:8px;">
+            <button id="btnAdd" class="btn ghost alt" disabled>Add To CD</button>
+            <button id="btnMp3" class="btn ghost" disabled>MP3</button>
+            <button id="btnWav" class="btn ghost" disabled>WAV</button>
+          </div>
+          <p class="note" id="pickedNote">We’ll auto-pick the best source (Opus &gt; AAC, ≥ 44 kHz).</p>
+        </div>
+        <div class="thumbWrap">
+          <img id="thumb" class="thumb" alt="thumbnail" style="display:none;">
+          <div id="thumbSkeleton" class="thumb skeleton" style="display:none;"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="gauge">
+        <div class="gauge__bar"><span id="gaugeFill"></span></div>
+        <div class="gauge__label"><span id="gaugeText">0:00 / 80:00</span></div>
+      </div>
+
+      <table class="list" id="list">
+        <thead>
+          <tr>
+            <th class="colTitle">Title</th>
+            <th class="colDur">Duration</th>
+            <th class="colAct">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="listBody"></tbody>
+      </table>
+
+      <div class="row end">
+        <button id="clear" class="btn ghost">Clear list</button>
+      </div>
+    </section>
+
+    <footer class="foot subtle">
+      For personal use. Ensure you have the rights to process any content you convert.
+    </footer>
+  </main>
+
+  <!-- Fullscreen loading overlay for MP3/WAV single downloads -->
+  <div id="overlay" class="overlay" style="display:none;">
+    <div class="loaderCard">
+      <div class="loaderImage"></div>
+      <div class="loaderText">Preparing your file<span id="dots">.</span></div>
+    </div>
+  </div>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
