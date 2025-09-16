@@ -92,9 +92,13 @@ h1 {
 /* Center the main URL field and limit its width */
 #url {
   display: block;
-  width: min(760px, 92vw);
+  /* 1) never exceed 640px  2) otherwise fill the panel minus its 16px padding on each side */
+  width: min(640px, calc(100% - 32px));
   margin: 0 auto;
 }
+
+/* If the URL field ever sits inside a .row (flex), don’t force it to stretch */
+#url.input { flex: 0 1 auto; }
 
 /* Buttons */
 .btn {
@@ -223,6 +227,7 @@ code {
 .thumbWrap.show { display: block; }  /* toggle this class when a thumb is available */
 
 .thumb {
+  display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
   object-fit: cover;

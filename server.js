@@ -479,6 +479,57 @@ app.post("/api/convert", async (req, res) => {
 });
 
 // -------------------------- Start -------------------------------
+// --- Thumbnail proxy: /thumb/:id -> tries WEBP/JPG fallbacks and streams back ---
+app.get("/thumb/:id", async (req, res) => {
+  try {
+    const raw = String(req.params.id || "");
+    const id  = raw.match(/^[A-Za-z0-9_-]{6,}$/) ? raw : null;
+    if (!id) return res.status(400).send("Bad id");
+
+    const tries = [
+      `https://i.ytimg.com/vi_webp/${id}/hqdefault.webp`,
+      `https://i.ytimg.com/vi/${id}/maxresdefault.jpg`,
+      `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+      `https://i.ytimg.com/vi/${id}/0.jpg`,
+    ];
+
+    for (const url of tries) {
+      const r = await fetch(url, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
+          "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+          "Referer": "https://www.youtube.com/",
+        },
+      });
+      if (!r.ok) continue;
+
+      const ct = r.headers.get("content-type") || "image/jpeg";
+      res.setHeader("Content-Type", ct);
+      res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+
+      // Stream or buffer depending on runtime
+      if (r.body && typeof r.body.getReader === "function") {
+        // Web stream → buffer
+        const buf = Buffer.from(await r.arrayBuffer());
+        res.end(buf);
+      } else if (r.body && typeof r.body.pipe === "function") {
+        // Node stream
+        r.body.pipe(res);
+      } else {
+        const buf = Buffer.from(await r.arrayBuffer());
+        res.end(buf);
+      }
+      return;
+    }
+
+    res.status(404).send("thumb not found");
+  } catch (e) {
+    res.status(500).send("thumb proxy error");
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log(`▶ Listening on http://localhost:${PORT}`);
   console.log(`FFmpeg: ${FF.bin || "NOT FOUND"}`);

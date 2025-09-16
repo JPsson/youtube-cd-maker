@@ -4,23 +4,25 @@ const btnMp3       = document.getElementById("btnMp3");
 const btnWav       = document.getElementById("btnWav");
 const pickedNoteEl = document.getElementById("pickedNote");
 
-// thumbnail elements
-const thumbWrap    = document.querySelector(".thumbWrap"); // wrapper (for spacing)
+const thumbWrap = document.querySelector(".thumbWrap");
 const thumbEl      = document.getElementById("thumb");
 const thumbSkelEl  = document.getElementById("thumbSkeleton");
 
-// list + gauge
 const listBody  = document.getElementById("listBody");
 const gaugeFill = document.getElementById("gaugeFill");
 const gaugeText = document.getElementById("gaugeText");
 const clearBtn  = document.getElementById("clear");
 
-// overlay for one-off downloads
 const overlay   = document.getElementById("overlay");
 
 let dotsTick = 0;
 let lastServerState = { capSeconds: 80*60, totalSeconds: 0, items: [] }; // cache
 const optimistic = []; // { token, title, duration, el: <tr> }
+
+// ===== Background probe cache =====
+// key: videoId || normalized URL
+// value: { fast?: data, smart?: data, pendingFast?:bool, pendingSmart?:bool, ts:number }
+const probeCache = new Map();
 
 // ---------- helpers ----------
 function debounce(fn, ms=220){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); }; }
@@ -47,21 +49,38 @@ function youTubeIdFrom(input){
   const m = String(input).match(/(?:youtu\.be\/|v=|shorts\/|embed\/)([A-Za-z0-9_-]{11})/);
   return m ? m[1] : null;
 }
+function keyFor(url){ return youTubeIdFrom(url) || url.trim(); }
 
 function setButtonsEnabled(on){
   btnAdd.disabled = !on; btnMp3.disabled = !on; btnWav.disabled = !on;
 }
 function showThumbById(id){
-  if (!id){ hideThumb(); return; }
-  thumbEl.src = `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
-  thumbWrap?.classList.add("show");
-  thumbEl.style.display = "block";
-  thumbSkelEl.style.display = "none";
+  if (!id) { hideThumb(); return; }
+
+  // show wrapper immediately (skeleton optional)
+  if (thumbWrap) thumbWrap.classList.add("show");
+  if (thumbSkelEl) thumbSkelEl.style.display = "block";
+  thumbEl.style.display = "none";
+
+  // use your proxy route (or swap to i.ytimg.com if you prefer)
+  const src = `/thumb/${id}?t=${Date.now()}`;
+
+  thumbEl.onload = () => {
+    thumbEl.style.display = "block";
+    if (thumbSkelEl) thumbSkelEl.style.display = "none";
+    if (thumbWrap) thumbWrap.classList.add("show"); // ensure visible
+  };
+  thumbEl.onerror = () => { hideThumb(); };
+
+  // guard against zero-height edge cases
+  thumbEl.style.minHeight = "1px";
+  thumbEl.src = src;
 }
+
 function hideThumb(){
-  thumbEl.style.display="none";
-  thumbSkelEl.style.display="none";
-  thumbWrap?.classList.remove("show");
+  if (thumbEl) { thumbEl.removeAttribute("src"); thumbEl.style.display = "none"; }
+  if (thumbSkelEl) thumbSkelEl.style.display = "none";
+  if (thumbWrap) thumbWrap.classList.remove("show");
 }
 
 function setPickedNoteIdle(){
@@ -81,7 +100,6 @@ function startOverlay(){
 function stopOverlay(){
   overlay.style.display = "none";
 }
-// drive the dots no matter when overlay text changes
 setInterval(()=>{ dotsTick=(dotsTick+1)%4; const d=document.getElementById("dots"); if (d) d.textContent=".".repeat(dotsTick); }, 400);
 
 function makeToken(){ return `tmp_${Date.now()}_${Math.random().toString(36).slice(2,7)}`; }
@@ -172,38 +190,77 @@ async function probe(url, { fast = false } = {}) {
   return r.json();
 }
 
-// ---------- Add To CD (optimistic, non-blocking; now with fast probe) ----------
+// ---------- Background probe orchestration (silent) ----------
+async function ensureBackgroundProbe(url){
+  const key = keyFor(url);
+  if (!key) return;
+  let entry = probeCache.get(key);
+  if (!entry) { entry = { pendingFast:false, pendingSmart:false }; probeCache.set(key, entry); }
+
+  // Fast (web) — quickest title/duration
+  if (!entry.fast && !entry.pendingFast){
+    entry.pendingFast = true;
+    probe(url, { fast: true })
+      .then(d => { entry.fast = d; entry.pendingFast = false; entry.ts = Date.now(); })
+      .catch(()=>{ entry.pendingFast = false; });
+  }
+  // Smart (parallel server-side) — richer formats
+  if (!entry.smart && !entry.pendingSmart){
+    entry.pendingSmart = true;
+    probe(url, { fast: false })
+      .then(d => { entry.smart = d; entry.pendingSmart = false; entry.ts = Date.now(); })
+      .catch(()=>{ entry.pendingSmart = false; });
+  }
+}
+
+// ---------- Add To CD (optimistic, uses cache first) ----------
 btnAdd.addEventListener("click", async () => {
   const url = urlEl.value.trim();
   if (!url) return;
 
+  // Hide thumb and create instant placeholder
   hideThumb();
-
   const token = makeToken();
   const opt = { token, title: "Loading…", duration: 0, el: null };
   optimistic.push(opt);
   renderServerRows();
   updateGauge();
 
+  // keep input free for next paste
   urlEl.value = "";
   urlEl.focus();
 
-  try {
-    // fast: web client → quick title/duration to update row and gauge
-    let best = null, data = null;
+  // Use cached probe if available (prefer smart > fast)
+  const key = keyFor(url);
+  const cache = key ? probeCache.get(key) : null;
+  let data = cache?.smart || cache?.fast || null;
+  let best = data?.bestFormat || null;
+  let usedClient = data?.usedClient || null;
+
+  if (data) {
+    opt.title = data.title || opt.title;
+    opt.duration = Number(data.duration || 0);
+    renderServerRows();
+    updateGauge();
+  } else {
+    // fallback: quick fast probe (still silent; no UI text)
     try {
       data = await probe(url, { fast: true });
+      best = data.bestFormat || null;
+      usedClient = data.usedClient || null;
       opt.title = data.title || opt.title;
       opt.duration = Number(data.duration || 0);
-      best = data.bestFormat || null; // may be null; server can still decide
-      setPickedNotePicked(best || null);
       renderServerRows();
       updateGauge();
-    } catch { /* continue with add anyway */ }
+      // keep cache warm
+      ensureBackgroundProbe(url);
+    } catch {/* ignore; we'll still try to add */}
+  }
 
+  try {
     const payload = best
-      ? { url, format_id: best.id, client_token: token, used_client: data?.usedClient || null }
-      : { url, client_token: token, used_client: data?.usedClient || null };
+      ? { url, format_id: best.id, client_token: token, used_client: usedClient || null }
+      : { url, client_token: token, used_client: usedClient || null };
 
     const r = await fetch("/api/add", {
       method:"POST",
@@ -224,48 +281,45 @@ btnAdd.addEventListener("click", async () => {
   }
 });
 
-// ---------- One-off MP3/WAV (overlay shows instantly, then fills in details) ----------
+// ---------- One-off MP3/WAV (overlay shows instantly; uses cache if possible) ----------
 async function oneOffDownload(target){
   const url = urlEl.value.trim();
   if (!url) return;
 
-  // Show overlay immediately (snappy UI)
+  // Overlay immediately with neutral message (no "analyzing" cue)
   const loaderTextEl = document.querySelector(".loaderText");
-  loaderTextEl.innerHTML = `Preparing your file<span id="dots">.</span><br><span class="subtle">Analyzing link…</span>`;
+  loaderTextEl.innerHTML = `Preparing your file<span id="dots">.</span>`;
   startOverlay();
 
-  // Smart probe to truly lock best audio-only format
-  let data;
-  try {
-    data = await probe(url, { fast: false });
-  } catch (e) {
-    stopOverlay();
-    setPickedNoteError("Could not analyze link before download.");
-    return;
+  // Prefer cached smart > fast; if none, we can still call /api/convert without fmtId
+  const key = keyFor(url);
+  const cache = key ? probeCache.get(key) : null;
+  const cachedData = cache?.smart || cache?.fast || null;
+
+  // If cached format exists, show details right away
+  let bf = cachedData?.bestFormat || null;
+  if (bf) {
+    const abr = bf.abr ? `${bf.abr} kbps` : (bf.tbr ? `${Math.round(bf.tbr)} kbps` : "—");
+    const asr = bf.asr ? `${bf.asr} Hz` : "—";
+    loaderTextEl.innerHTML = `Preparing your file<span id="dots">.</span><br><span class="subtle">${esc(bf.acodec || "")} · ${esc(abr)} · ${esc(asr)} · id <code>${esc(bf.id)}</code></span>`;
   }
 
-  const bf = data.bestFormat;
-  if (!bf) {
-    stopOverlay();
-    setPickedNoteError("No suitable audio-only format ≥ 44.1 kHz found.");
-    return;
-  }
-
-  // Fill in exact format (keep overlay visible)
-  const abr = bf.abr ? `${bf.abr} kbps` : (bf.tbr ? `${Math.round(bf.tbr)} kbps` : "—");
-  const asr = bf.asr ? `${bf.asr} Hz` : "—";
-  loaderTextEl.innerHTML = `Preparing your file<span id="dots">.</span><br><span class="subtle">${esc(bf.acodec || "")} · ${esc(abr)} · ${esc(asr)} · id <code>${esc(bf.id)}</code></span>`;
+  // If nothing cached yet, kick background probes (silent); we won’t wait to show text
+  if (!cachedData) ensureBackgroundProbe(url);
 
   try{
+    // Build request using whatever we know; server can still choose best if no fmtId
+    const body = {
+      url,
+      target,
+      format_id: bf?.id || undefined,
+      used_client: (cachedData && cachedData.usedClient) || null
+    };
+
     const r = await fetch("/api/convert", {
       method:"POST",
       headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify({
-        url,
-        target,
-        format_id: bf.id,
-        used_client: data.usedClient || null
-      })
+      body: JSON.stringify(body)
     });
 
     if (!r.ok) {
@@ -329,7 +383,7 @@ async function oneOffDownload(target){
 btnMp3.addEventListener("click", () => oneOffDownload("mp3"));
 btnWav.addEventListener("click", () => oneOffDownload("wav"));
 
-// ---------- URL handling ----------
+// ---------- URL handling (silent background prefetch) ----------
 function onUrlChanged(){
   const url = urlEl.value.trim();
   const valid = isYouTubeUrl(url);
@@ -337,11 +391,13 @@ function onUrlChanged(){
   if (valid){
     const id = youTubeIdFrom(url);
     if (id) showThumbById(id);
+    // kick off background probes silently
+    ensureBackgroundProbe(url);
   } else {
     hideThumb();
   }
 }
-urlEl.addEventListener("input", debounce(onUrlChanged, 150));
+urlEl.addEventListener("input", debounce(onUrlChanged, 120));
 urlEl.addEventListener("paste", () => setTimeout(onUrlChanged, 0));
 urlEl.addEventListener("blur", onUrlChanged);
 
