@@ -13,23 +13,30 @@
       <p class="subtle">Paste a YouTube link. Pick <strong>Add To CD</strong>, or get a one-off <strong>MP3</strong>/<strong>WAV</strong> download.</p>
     </header>
 
-    <section class="panel">
-      <div class="row" style="align-items:flex-start; gap:12px;">
-        <div style="flex:1;">
-          <input id="url" class="input" placeholder="https://www.youtube.com/watch?v=…" />
-          <div class="row" style="margin-top:8px;">
-            <button id="btnAdd" class="btn ghost alt" disabled>Add To CD</button>
-            <button id="btnMp3" class="btn ghost" disabled>MP3</button>
-            <button id="btnWav" class="btn ghost" disabled>WAV</button>
-          </div>
-          <p class="note" id="pickedNote">We’ll auto-pick the best source (Opus &gt; AAC, ≥ 44 kHz).</p>
-        </div>
-        <div class="thumbWrap">
-          <img id="thumb" class="thumb" alt="thumbnail" style="display:none;">
-          <div id="thumbSkeleton" class="thumb skeleton" style="display:none;"></div>
-        </div>
+    <!-- TOP PANEL -->
+    <section class="panel stack" id="panelTop">
+      <!-- Centered URL input -->
+      <input id="url" class="input" placeholder="https://www.youtube.com/watch?v=…" />
+
+      <!-- Thumbnail UNDER the input (hidden until a link is valid) -->
+      <div class="thumbWrap">
+        <img id="thumb" class="thumb" alt="thumbnail" style="display:none;">
+        <div id="thumbSkeleton" class="thumb skeleton" style="display:none;"></div>
       </div>
+
+      <!-- Centered buttons -->
+      <div class="row actions">
+        <button id="btnAdd" class="btn ghost alt" disabled>Add To CD</button>
+        <span class="or">or</span>
+        <button id="btnMp3" class="btn ghost" disabled>MP3</button>
+        <button id="btnWav" class="btn ghost" disabled>WAV</button>
+      </div>
+
+      <p class="note" id="pickedNote">
+        We’ll auto-pick the best source (Opus &gt; AAC, ≥ 44 kHz).
+      </p>
     </section>
+
 
     <section class="panel">
       <div class="gauge">

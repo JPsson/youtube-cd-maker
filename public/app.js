@@ -4,14 +4,18 @@ const btnMp3       = document.getElementById("btnMp3");
 const btnWav       = document.getElementById("btnWav");
 const pickedNoteEl = document.getElementById("pickedNote");
 
+// thumbnail elements
+const thumbWrap    = document.querySelector(".thumbWrap"); // wrapper (for spacing)
 const thumbEl      = document.getElementById("thumb");
 const thumbSkelEl  = document.getElementById("thumbSkeleton");
 
+// list + gauge
 const listBody  = document.getElementById("listBody");
 const gaugeFill = document.getElementById("gaugeFill");
 const gaugeText = document.getElementById("gaugeText");
 const clearBtn  = document.getElementById("clear");
 
+// overlay for one-off downloads
 const overlay   = document.getElementById("overlay");
 
 let dotsTick = 0;
@@ -48,12 +52,17 @@ function setButtonsEnabled(on){
   btnAdd.disabled = !on; btnMp3.disabled = !on; btnWav.disabled = !on;
 }
 function showThumbById(id){
-  if (!id){ thumbEl.style.display="none"; thumbSkelEl.style.display="none"; return; }
+  if (!id){ hideThumb(); return; }
   thumbEl.src = `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
+  thumbWrap?.classList.add("show");
   thumbEl.style.display = "block";
   thumbSkelEl.style.display = "none";
 }
-function hideThumb(){ thumbEl.style.display="none"; thumbSkelEl.style.display="none"; }
+function hideThumb(){
+  thumbEl.style.display="none";
+  thumbSkelEl.style.display="none";
+  thumbWrap?.classList.remove("show");
+}
 
 function setPickedNoteIdle(){
   pickedNoteEl.textContent = "We’ll auto-pick the best source (Opus > AAC, ≥ 44 kHz).";
@@ -220,7 +229,7 @@ async function oneOffDownload(target){
   const url = urlEl.value.trim();
   if (!url) return;
 
-  // Show overlay immediately
+  // Show overlay immediately (snappy UI)
   const loaderTextEl = document.querySelector(".loaderText");
   loaderTextEl.innerHTML = `Preparing your file<span id="dots">.</span><br><span class="subtle">Analyzing link…</span>`;
   startOverlay();

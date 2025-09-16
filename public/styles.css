@@ -46,8 +46,28 @@ h1 {
   margin-top: 16px;
 }
 
+/* A generic row */
 .row { display: flex; gap: 8px; align-items: center; }
 .row.end { justify-content: flex-end; }
+
+/* Actions row (buttons under the thumbnail) */
+.row.actions {
+  justify-content: center;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.or {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+
 
 /* ========== form controls & buttons ========== */
 .input, .select {
@@ -69,6 +89,14 @@ h1 {
 
 .select { flex: 0 0 220px; }
 
+/* Center the main URL field and limit its width */
+#url {
+  display: block;
+  width: min(760px, 92vw);
+  margin: 0 auto;
+}
+
+/* Buttons */
 .btn {
   background: var(--accent);
   color: #000;
@@ -78,6 +106,8 @@ h1 {
   cursor: pointer;
   font-weight: 700;
   transition: transform 80ms ease, opacity 120ms ease, background-color 120ms ease;
+  min-width: 110px;
+  text-align: center;
 }
 
 .btn:hover:not(:disabled) { transform: translateY(-1px); }
@@ -87,6 +117,26 @@ h1 {
 .btn.ghost {
   background: transparent;
   color: var(--text);
+}
+
+/* Slightly filled variant for "Add To CD" so it reads as a different action */
+.btn.ghost.alt {
+  background: #17171b;          /* barely filled */
+  border-color: #33333a;
+}
+.btn.ghost.alt:hover { background: #1b1b20; }
+.btn.ghost.alt:disabled { background: transparent; }
+
+/* Small "or" between Add and format buttons */
+.or {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  user-select: none;
 }
 
 /* ========== small text & code ========== */
@@ -163,8 +213,14 @@ code {
   color: var(--danger);
 }
 
-/* ========== thumbnail ========== */
-.thumbWrap { width: 180px; flex: 0 0 180px; }
+/* ========== thumbnail (appears between input and buttons) ========== */
+/* We hide the whole wrapper until a thumbnail is shown so spacing collapses cleanly. */
+.thumbWrap {
+  display: none;                 /* hidden by default */
+  margin: 14px auto 10px;             /* pushes input up & buttons down equally when shown */
+  width: clamp(240px, 44vw, 420px);
+}
+.thumbWrap.show { display: block; }  /* toggle this class when a thumb is available */
 
 .thumb {
   width: 100%;
@@ -217,20 +273,14 @@ code {
 
 /* ========== responsive niceties ========== */
 @media (max-width: 700px) {
-  .thumbWrap { width: 40%; flex: 0 0 40%; }
   .colAct { width: 140px; }
+  .thumbWrap { width: 70vw; }
 }
 
 /* prevent accidental text selection on quick clicks */
 .btn, .action { user-select: none; }
 
-.btn.ghost.alt {
-  background: #17171b;          /* barely filled */
-  border-color: #33333a;
-}
-.btn.ghost.alt:hover { background: #1b1b20; }
-.btn.ghost.alt:disabled { background: transparent; }
-
+/* Formats debug block (when we show available formats in errors) */
 .fmt-debug details { margin-top: 8px; }
 .fmt-debug summary { cursor: pointer; color: var(--muted); }
 .fmt-pre {
