@@ -45,6 +45,7 @@
       <table class="list" id="list">
         <thead>
           <tr>
+            <th class="colIndex">#</th>
             <th class="colTitle">Title</th>
             <th class="colDur">Duration</th>
             <th class="colAct">Actions</th>
@@ -53,8 +54,9 @@
         <tbody id="listBody"></tbody>
       </table>
 
-      <div class="row end">
+      <div class="listActions">
         <button id="clear" class="btn ghost">Clear list</button>
+        <button id="downloadZip" class="btn ghost" disabled>Download ZIP archive</button>
       </div>
     </section>
 
@@ -65,10 +67,21 @@
   </main>
 
   <!-- Fullscreen loading overlay for MP3/WAV single downloads -->
-  <div id="overlay" class="overlay" style="display:none;">
-    <div class="loaderCard">
-      <div class="loaderImage"></div>
-      <div class="loaderText">Preparing your file<span id="dots">.</span></div>
+  <div id="overlay" class="overlay" hidden aria-hidden="true">
+    <div class="overlayCard" role="dialog" aria-live="polite">
+      <div class="overlayVisual">
+        <div id="overlayDisc" class="overlayDisc" aria-hidden="true"></div>
+        <div id="overlayThumbFrame" class="overlayThumbFrame">
+          <div id="overlayThumbSkeleton" class="overlayThumb skeleton" hidden></div>
+          <img id="overlayThumb" class="overlayThumb" alt="" decoding="async" />
+        </div>
+      </div>
+      <div class="overlayText">
+        <div class="overlayTitle">
+          <span id="overlayTitle">Preparing your file</span><span id="overlayDots">.</span>
+        </div>
+        <div id="overlaySubtitle" class="overlaySubtitle subtle"></div>
+      </div>
     </div>
   </div>
 

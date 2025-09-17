@@ -13,20 +13,77 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
 // --------------------------- App setup ---------------------------
-const app  = express();
-const PORT = process.env.PORT || 3000;
-const DOWNLOAD_DIR = path.join(__dirname, "downloads");
-const TMP_DIR = path.join(__dirname, "tmp");
-await fsp.mkdir(DOWNLOAD_DIR, { recursive: true });
-await fsp.mkdir(TMP_DIR, { recursive: true });
+const config = {
+  port: Number(process.env.PORT) || 3000,
+  capSeconds: 80 * 60,
+  downloadDir: path.join(__dirname, "downloads"),
+  tmpDir: path.join(__dirname, "tmp"),
+};
+
+await fsp.mkdir(config.downloadDir, { recursive: true });
+await fsp.mkdir(config.tmpDir, { recursive: true });
+
+const app = express();
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
-app.use("/downloads", express.static(DOWNLOAD_DIR));
+app.use("/downloads", express.static(config.downloadDir));
 
-// Capacity (80-minute CD)
-const CAP_SECONDS = 80 * 60;
-let playlist = []; // { id, title, duration, filepath, sizeBytes }
+class PlaylistStore {
+  constructor(capSeconds) {
+    this.capSeconds = capSeconds;
+    this.items = [];
+  }
+
+  get totalSeconds() {
+    return this.items.reduce((acc, t) => acc + (t.duration || 0), 0);
+  }
+
+  add(item) {
+    this.items.push(item);
+  }
+
+  remove(id) {
+    const idx = this.items.findIndex((t) => t.id === id);
+    if (idx === -1) return null;
+    const [removed] = this.items.splice(idx, 1);
+    return removed;
+  }
+
+  clear() {
+    const cleared = this.items.slice();
+    this.items.length = 0;
+    return cleared;
+  }
+
+  find(id) {
+    return this.items.find((t) => t.id === id) || null;
+  }
+
+  toJSON() {
+    return {
+      capSeconds: this.capSeconds,
+      totalSeconds: this.totalSeconds,
+      items: this.items.map(({ id, title, duration, sizeBytes, videoId, thumbnail }) => ({
+        id,
+        title,
+        duration,
+        sizeBytes,
+        videoId: videoId || null,
+        thumbnail: thumbnail || null,
+      })),
+    };
+  }
+}
+
+const playlistStore = new PlaylistStore(config.capSeconds);
+
+async function safeUnlink(filePath) {
+  if (!filePath) return;
+  try {
+    await fsp.unlink(filePath);
+  } catch {}
+}
 
 // ------------------------- Helpers -------------------------------
 function run(cmd, args, opts = {}) {
@@ -79,6 +136,12 @@ async function detectFfmpeg() {
 
 const FF = await detectFfmpeg();
 const YD = await detectYtDlp();
+const ZIP = await (async () => {
+  const candidate = process.env.ZIP_PATH || "zip";
+  const det = await detectCommand(candidate);
+  if (!det.ok) return { bin: null };
+  return { bin: candidate };
+})();
 
 function requireBinsOrThrow() {
   if (!FF.bin) throw new Error("ffmpeg not found. Set FFMPEG_PATH env var to its full path.");
@@ -88,10 +151,6 @@ function requireBinsOrThrow() {
 function runYtDlp(args, opts = {}) {
   if (YD.mode === "python") return spawn(YD.bin, ["-m", "yt_dlp", ...args], opts);
   return spawn(YD.bin, args, opts);
-}
-
-function sumDuration() {
-  return playlist.reduce((acc, t) => acc + (t.duration || 0), 0);
 }
 
 const COOKIES_PATH  = process.env.COOKIES_PATH || null;
@@ -211,7 +270,7 @@ function pickThumbnail(meta) {
 // ---------- Download & transcode ----------
 async function downloadSourceToTmp(url, formatId, clientArg /* pass-through */) {
   requireBinsOrThrow();
-  const outTmpl = path.join(TMP_DIR, "%(title)s-%(id)s.%(ext)s");
+  const outTmpl = path.join(config.tmpDir, "%(title)s-%(id)s.%(ext)s");
   const args = [];
   if (formatId) args.push("-f", String(formatId));
   if (COOKIES_PATH) args.push("--cookies", COOKIES_PATH);
@@ -236,7 +295,7 @@ async function downloadSourceToTmp(url, formatId, clientArg /* pass-through */) 
 
 async function transcodeToMp3V0(inputPath) {
   const id = nanoid(8);
-  const out = path.join(TMP_DIR, `${id}.mp3`);
+  const out = path.join(config.tmpDir, `${id}.mp3`);
   const args = ["-y", "-i", inputPath, "-vn", "-c:a", "libmp3lame", "-q:a", "0", out];
   const { code, stderr } = await run(FF.bin, args);
   if (code !== 0 || !fs.existsSync(out)) throw new Error(`ffmpeg mp3 failed: ${stderr}`);
@@ -245,15 +304,22 @@ async function transcodeToMp3V0(inputPath) {
 
 async function transcodeToWav4416(inputPath) {
   const id = nanoid(8);
-  const out = path.join(TMP_DIR, `${id}.wav`);
+  const out = path.join(config.tmpDir, `${id}.wav`);
   const args = ["-y", "-i", inputPath, "-vn", "-ar", "44100", "-ac", "2", "-sample_fmt", "s16", out];
   const { code, stderr } = await run(FF.bin, args);
   if (code !== 0 || !fs.existsSync(out)) throw new Error(`ffmpeg wav failed: ${stderr}`);
   return out;
 }
 
-function streamAndUnlink(res, filePath, downloadName) {
-  const mime = filePath.endsWith(".mp3") ? "audio/mpeg" : "audio/wav";
+function streamAndUnlink(res, filePath, downloadName, mimeOverride) {
+  const ext = path.extname(filePath).toLowerCase();
+  let mime = mimeOverride;
+  if (!mime) {
+    if (ext === ".mp3") mime = "audio/mpeg";
+    else if (ext === ".wav") mime = "audio/wav";
+    else if (ext === ".zip") mime = "application/zip";
+    else mime = "application/octet-stream";
+  }
   const rs = fs.createReadStream(filePath);
   res.setHeader("Content-Type", mime);
   res.setHeader("Content-Disposition", `attachment; filename="${downloadName}"`);
@@ -265,35 +331,70 @@ function streamAndUnlink(res, filePath, downloadName) {
 
 // --------------------------- Routes ------------------------------
 app.get("/api/diag", async (_req, res) => {
-  res.json({ ffmpeg: FF, ytdlp: YD });
+  res.json({ ffmpeg: FF, ytdlp: YD, zip: ZIP });
 });
 
 app.get("/api/list", (_req, res) => {
-  res.json({
-    capSeconds: CAP_SECONDS,
-    totalSeconds: sumDuration(),
-    items: playlist.map(({ id, title, duration, sizeBytes }) => ({ id, title, duration, sizeBytes }))
-  });
+  res.json(playlistStore.toJSON());
 });
 
 app.post("/api/clear", async (_req, res) => {
-  await Promise.allSettled(playlist.map(t => fsp.unlink(t.filepath).catch(()=>{})));
-  playlist = [];
-  res.json({ ok: true });
+  const cleared = playlistStore.clear();
+  await Promise.allSettled(cleared.map((t) => safeUnlink(t.filepath)));
+  res.json({ ok: true, totalSeconds: playlistStore.totalSeconds });
 });
 
 app.post("/api/remove/:id", async (req, res) => {
-  const idx = playlist.findIndex(t => t.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: "not found" });
-  try { await fsp.unlink(playlist[idx].filepath); } catch {}
-  playlist.splice(idx, 1);
-  res.json({ ok: true, totalSeconds: sumDuration() });
+  const removed = playlistStore.remove(req.params.id);
+  if (!removed) return res.status(404).json({ error: "not found" });
+  await safeUnlink(removed.filepath);
+  res.json({
+    ok: true,
+    totalSeconds: playlistStore.totalSeconds,
+    capSeconds: playlistStore.capSeconds,
+  });
 });
 
 app.get("/api/file/:id", (req, res) => {
-  const item = playlist.find(t => t.id === req.params.id);
+  const item = playlistStore.find(req.params.id);
   if (!item) return res.status(404).end();
   res.download(item.filepath, path.basename(item.filepath));
+});
+
+app.get("/api/zip", async (_req, res) => {
+  if (!playlistStore.items.length) {
+    return res.status(400).json({ error: "Playlist is empty" });
+  }
+  if (!ZIP.bin) {
+    return res.status(500).json({ error: "ZIP utility not available" });
+  }
+
+  const files = playlistStore.items
+    .map((item) => item?.filepath)
+    .filter((filePath) => filePath && fs.existsSync(filePath));
+
+  if (!files.length) {
+    return res.status(400).json({ error: "No files available to zip" });
+  }
+
+  try {
+    const zipPath = path.join(config.tmpDir, `cd-${nanoid(10)}.zip`);
+    const args = ["-j", "-q", zipPath, ...files];
+    const { code, stderr } = await run(ZIP.bin, args);
+    if (code !== 0 || !fs.existsSync(zipPath)) {
+      throw new Error(stderr || `zip exited with code ${code}`);
+    }
+
+    const downloadName = `${safeBase("cd-playlist")}.zip`;
+    streamAndUnlink(res, zipPath, downloadName, "application/zip");
+  } catch (err) {
+    console.error("[zip] error:", err?.message || err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "ZIP failed", message: String(err?.message || err) });
+    } else {
+      res.end();
+    }
+  }
 });
 
 // Probe: supports { fast: true } for quickest title/duration via web client
@@ -368,7 +469,7 @@ app.post("/api/add", async (req, res) => {
       "--audio-quality", audioQuality,
       "--no-playlist",
       "--restrict-filenames",
-      "-o", path.join(DOWNLOAD_DIR, "%(title)s-%(id)s.%(ext)s"),
+      "-o", path.join(config.downloadDir, "%(title)s-%(id)s.%(ext)s"),
       "--print", "after_move:filepath",
       url
     );
@@ -386,13 +487,22 @@ app.post("/api/add", async (req, res) => {
       title: metaR.meta.title || path.basename(file),
       duration: Number(metaR.meta.duration) || 0,
       filepath: file,
-      sizeBytes: stat.size
+      sizeBytes: stat.size,
+      videoId: metaR.meta.id || null,
+      thumbnail: pickThumbnail(metaR.meta) || null,
     };
-    playlist.push(item);
+    playlistStore.add(item);
     res.json({
-      item: { id: item.id, title: item.title, duration: item.duration, sizeBytes: item.sizeBytes },
-      totalSeconds: sumDuration(),
-      capSeconds: CAP_SECONDS,
+      item: {
+        id: item.id,
+        title: item.title,
+        duration: item.duration,
+        sizeBytes: item.sizeBytes,
+        videoId: item.videoId,
+        thumbnail: item.thumbnail,
+      },
+      totalSeconds: playlistStore.totalSeconds,
+      capSeconds: playlistStore.capSeconds,
       client_token
     });
   } catch (e) {
@@ -530,8 +640,9 @@ app.get("/thumb/:id", async (req, res) => {
 });
 
 
-app.listen(PORT, () => {
-  console.log(`▶ Listening on http://localhost:${PORT}`);
+app.listen(config.port, () => {
+  console.log(`▶ Listening on http://localhost:${config.port}`);
   console.log(`FFmpeg: ${FF.bin || "NOT FOUND"}`);
   console.log(`yt-dlp: ${YD.bin || "NOT FOUND"} ${YD.mode ? `(mode: ${YD.mode})` : ""}`);
+  console.log(`zip: ${ZIP.bin || "NOT FOUND"}`);
 });

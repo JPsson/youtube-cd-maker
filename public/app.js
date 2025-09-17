@@ -1,414 +1,841 @@
-const urlEl        = document.getElementById("url");
-const btnAdd       = document.getElementById("btnAdd");
-const btnMp3       = document.getElementById("btnMp3");
-const btnWav       = document.getElementById("btnWav");
-const pickedNoteEl = document.getElementById("pickedNote");
+const dom = {
+  url: document.getElementById("url"),
+  btnAdd: document.getElementById("btnAdd"),
+  btnMp3: document.getElementById("btnMp3"),
+  btnWav: document.getElementById("btnWav"),
+  pickedNote: document.getElementById("pickedNote"),
+  thumbWrap: document.querySelector(".thumbWrap"),
+  thumb: document.getElementById("thumb"),
+  thumbSkeleton: document.getElementById("thumbSkeleton"),
+  listBody: document.getElementById("listBody"),
+  gaugeFill: document.getElementById("gaugeFill"),
+  gaugeText: document.getElementById("gaugeText"),
+  clearBtn: document.getElementById("clear"),
+  downloadZipBtn: document.getElementById("downloadZip"),
+  overlayRoot: document.getElementById("overlay"),
+  overlayTitle: document.getElementById("overlayTitle"),
+  overlaySubtitle: document.getElementById("overlaySubtitle"),
+  overlayDots: document.getElementById("overlayDots"),
+  overlayThumbFrame: document.getElementById("overlayThumbFrame"),
+  overlayThumb: document.getElementById("overlayThumb"),
+  overlayThumbSkeleton: document.getElementById("overlayThumbSkeleton"),
+  overlayDisc: document.getElementById("overlayDisc"),
+};
 
-const thumbWrap = document.querySelector(".thumbWrap");
-const thumbEl      = document.getElementById("thumb");
-const thumbSkelEl  = document.getElementById("thumbSkeleton");
+const state = {
+  server: { capSeconds: 80 * 60, totalSeconds: 0, items: [] },
+  optimisticAdds: [],
+};
 
-const listBody  = document.getElementById("listBody");
-const gaugeFill = document.getElementById("gaugeFill");
-const gaugeText = document.getElementById("gaugeText");
-const clearBtn  = document.getElementById("clear");
+const probeCache = new Map(); // key -> { fast, smart, pendingFast, pendingSmart, ts }
 
-const overlay   = document.getElementById("overlay");
+class DotsAnimator {
+  constructor(target, interval = 400) {
+    this.target = target;
+    this.interval = interval;
+    this.timer = null;
+    this.tick = 0;
+  }
 
-let dotsTick = 0;
-let lastServerState = { capSeconds: 80*60, totalSeconds: 0, items: [] }; // cache
-const optimistic = []; // { token, title, duration, el: <tr> }
+  start() {
+    if (!this.target) return;
+    this.stop();
+    this.tick = 0;
+    this.target.textContent = ".";
+    this.timer = setInterval(() => {
+      this.tick = (this.tick + 1) % 4;
+      this.target.textContent = ".".repeat(this.tick || 1);
+    }, this.interval);
+  }
 
-// ===== Background probe cache =====
-// key: videoId || normalized URL
-// value: { fast?: data, smart?: data, pendingFast?:bool, pendingSmart?:bool, ts:number }
-const probeCache = new Map();
-
-// ---------- helpers ----------
-function debounce(fn, ms=220){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); }; }
-function fmtTime(s){ s=Math.max(0,Math.floor(s||0)); const m=Math.floor(s/60), ss=s%60; return `${m}:${String(ss).padStart(2,"0")}`; }
-function esc(s){ return String(s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-
-function isYouTubeUrl(str){
-  try {
-    const u=new URL(str.trim()); const h=u.hostname.replace(/^www\./,'');
-    return h==="youtube.com"||h==="m.youtube.com"||h==="youtu.be"||h.endsWith(".youtube.com");
-  } catch { return false; }
+  stop() {
+    if (!this.target) return;
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    this.tick = 0;
+    this.target.textContent = "";
+  }
 }
-function youTubeIdFrom(input){
+
+class OverlayController {
+  constructor({
+    root,
+    title,
+    subtitle,
+    thumbFrame,
+    thumb,
+    thumbSkeleton,
+    disc,
+  }) {
+    this.root = root;
+    this.titleEl = title;
+    this.subtitleEl = subtitle;
+    this.thumbFrameEl = thumbFrame;
+    this.thumbEl = thumb;
+    this.thumbSkeletonEl = thumbSkeleton;
+    this.discEl = disc;
+    this.currentThumbHandler = null;
+  }
+
+  showConversion({ title, subtitle, thumbSrc }) {
+    this.prepareOverlay("convert");
+    this.setTitle(title);
+    this.setSubtitle(subtitle);
+    this.renderDisc([]);
+    this.renderThumb(thumbSrc);
+  }
+
+  showZip({ title, subtitle, thumbnails }) {
+    this.prepareOverlay("zip");
+    this.setTitle(title);
+    this.setSubtitle(subtitle);
+    this.renderThumb(null);
+    this.renderDisc(thumbnails);
+  }
+
+  prepareOverlay(mode) {
+    if (!this.root) return;
+    this.root.dataset.mode = mode;
+    this.root.hidden = false;
+    this.root.setAttribute("aria-hidden", "false");
+  }
+
+  setTitle(title) {
+    if (!this.titleEl) return;
+    this.titleEl.textContent = title || "";
+  }
+
+  setSubtitle(subtitle, { allowHtml = false } = {}) {
+    if (!this.subtitleEl) return;
+    if (allowHtml) {
+      this.subtitleEl.innerHTML = subtitle || "";
+    } else {
+      this.subtitleEl.textContent = subtitle || "";
+    }
+  }
+
+  hide() {
+    if (!this.root) return;
+    this.root.hidden = true;
+    this.root.setAttribute("aria-hidden", "true");
+    this.setTitle("");
+    this.setSubtitle("");
+    this.renderThumb(null);
+    this.renderDisc([]);
+  }
+
+  renderThumb(src) {
+    if (!this.thumbFrameEl || !this.thumbEl || !this.thumbSkeletonEl) return;
+
+    if (!src) {
+      this.thumbEl.removeAttribute("src");
+      this.thumbEl.classList.remove("show");
+      this.thumbFrameEl.classList.remove("show");
+      this.thumbSkeletonEl.hidden = true;
+      this.currentThumbHandler = null;
+      return;
+    }
+
+    const img = this.thumbEl;
+    if (this.currentThumbHandler) {
+      img.removeEventListener("load", this.currentThumbHandler.load);
+      img.removeEventListener("error", this.currentThumbHandler.error);
+    }
+
+    this.thumbFrameEl.classList.add("show");
+    this.thumbSkeletonEl.hidden = false;
+    img.classList.remove("show");
+
+    const onLoad = () => {
+      this.thumbSkeletonEl.hidden = true;
+      img.classList.add("show");
+    };
+    const onError = () => {
+      this.thumbSkeletonEl.hidden = true;
+      this.thumbFrameEl.classList.remove("show");
+      img.classList.remove("show");
+      img.removeAttribute("src");
+    };
+
+    this.currentThumbHandler = { load: onLoad, error: onError };
+    img.addEventListener("load", onLoad, { once: true });
+    img.addEventListener("error", onError, { once: true });
+    img.src = src;
+  }
+
+  renderDisc(thumbnails) {
+    if (!this.discEl) return;
+    this.discEl.innerHTML = "";
+    if (!Array.isArray(thumbnails) || thumbnails.length === 0) {
+      this.discEl.classList.remove("show");
+      return;
+    }
+
+    const unique = Array.from(new Set(thumbnails.filter(Boolean)));
+    if (!unique.length) {
+      this.discEl.classList.remove("show");
+      return;
+    }
+
+    this.discEl.classList.add("show");
+
+    const maxItems = 18;
+    const items = unique.slice(0, maxItems);
+    const total = items.length;
+    const outerCount = total > 8 ? Math.ceil(total * 0.6) : total;
+    const innerCount = total - outerCount;
+    const outerRadius =
+      total === 1 ? 0 : total === 2 ? 28 : total <= 5 ? 34 : total <= 10 ? 38 : 42;
+    const innerRadius =
+      innerCount > 0 ? Math.max(16, Math.round(outerRadius * 0.55)) : 0;
+    const baseSize =
+      total === 1
+        ? 58
+        : total <= 3
+        ? 44
+        : total <= 5
+        ? 34
+        : total <= 9
+        ? 28
+        : 22;
+
+    items.forEach((src, idx) => {
+      const img = document.createElement("img");
+      img.src = src;
+      img.alt = "";
+
+      const inOuter = idx < outerCount || innerCount <= 0;
+      const positionIndex = inOuter ? idx : idx - outerCount;
+      const ringCount = inOuter ? outerCount : innerCount || 1;
+      const radius = inOuter ? outerRadius : innerRadius;
+      const angle = (positionIndex / ringCount) * Math.PI * 2 - Math.PI / 2;
+      const x = 50 + Math.cos(angle) * radius;
+      const y = 50 + Math.sin(angle) * radius;
+      const size = inOuter ? baseSize : Math.max(18, baseSize - 8);
+      const tiltBase = inOuter ? 14 : 8;
+      const tilt = (positionIndex % 2 === 0 ? -1 : 1) * (tiltBase + (positionIndex % 3) * 3);
+
+      img.style.width = `${size}%`;
+      img.style.left = `${x}%`;
+      img.style.top = `${y}%`;
+      img.style.transform = `translate(-50%, -50%) rotate(${tilt}deg)`;
+
+      this.discEl.appendChild(img);
+    });
+  }
+}
+
+class PlaylistRenderer {
+  constructor({ body, gaugeFill, gaugeText }) {
+    this.body = body;
+    this.gaugeFill = gaugeFill;
+    this.gaugeText = gaugeText;
+  }
+
+  render(server, optimistic) {
+    if (!this.body) return;
+
+    const frag = document.createDocumentFragment();
+    const serverItems = Array.isArray(server.items) ? server.items : [];
+
+    serverItems.forEach((item, idx) => {
+      frag.appendChild(this.createServerRow(item, idx + 1));
+    });
+
+    optimistic.forEach((item, idx) => {
+      frag.appendChild(this.createOptimisticRow(item, serverItems.length + idx + 1));
+    });
+
+    this.body.replaceChildren(frag);
+    this.renderGauge(server, optimistic);
+  }
+
+  createServerRow(item, index) {
+    const tr = document.createElement("tr");
+
+    const idxTd = document.createElement("td");
+    idxTd.className = "colIndex";
+    idxTd.textContent = index;
+    tr.appendChild(idxTd);
+
+    const titleTd = document.createElement("td");
+    titleTd.className = "colTitle";
+    titleTd.textContent = item?.title || "Untitled";
+    tr.appendChild(titleTd);
+
+    const durTd = document.createElement("td");
+    durTd.className = "colDur";
+    durTd.textContent = fmtTime(item?.duration || 0);
+    tr.appendChild(durTd);
+
+    const actTd = document.createElement("td");
+    actTd.className = "colAct";
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "action danger";
+    removeBtn.dataset.remove = item.id;
+    removeBtn.textContent = "Remove";
+    actTd.appendChild(removeBtn);
+    tr.appendChild(actTd);
+
+    return tr;
+  }
+
+  createOptimisticRow(item, index) {
+    const tr = document.createElement("tr");
+
+    const idxTd = document.createElement("td");
+    idxTd.className = "colIndex";
+    idxTd.textContent = index;
+    tr.appendChild(idxTd);
+
+    const titleTd = document.createElement("td");
+    titleTd.className = "colTitle";
+    titleTd.textContent = item?.title || "Loading…";
+    tr.appendChild(titleTd);
+
+    const durTd = document.createElement("td");
+    durTd.className = "colDur";
+    durTd.textContent = item?.duration ? fmtTime(item.duration) : "—";
+    tr.appendChild(durTd);
+
+    const actTd = document.createElement("td");
+    actTd.className = "colAct";
+    const status = document.createElement("span");
+    status.className = "subtle";
+    status.textContent = "Adding…";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "action danger";
+    cancelBtn.dataset.cancel = item.token;
+    cancelBtn.textContent = "Cancel";
+    actTd.append(status, document.createTextNode(" "), cancelBtn);
+    tr.appendChild(actTd);
+
+    return tr;
+  }
+
+  renderGauge(server, optimistic) {
+    if (!this.gaugeFill || !this.gaugeText) return;
+    const cap = server.capSeconds || 80 * 60;
+    const optimisticSeconds = optimistic.reduce((acc, o) => acc + (o.duration || 0), 0);
+    const used = (server.totalSeconds || 0) + optimisticSeconds;
+    const pct = Math.min(100, Math.round((used / cap) * 100));
+
+    this.gaugeFill.style.width = pct + "%";
+    this.gaugeFill.style.opacity = used > cap ? "0.6" : "1";
+    this.gaugeFill.style.filter = used > cap ? "grayscale(1)" : "none";
+    this.gaugeText.textContent = `${fmtTime(used)} / ${fmtTime(cap)}`;
+  }
+}
+
+const dotsAnimator = new DotsAnimator(dom.overlayDots);
+const overlay = new OverlayController({
+  root: dom.overlayRoot,
+  title: dom.overlayTitle,
+  subtitle: dom.overlaySubtitle,
+  thumbFrame: dom.overlayThumbFrame,
+  thumb: dom.overlayThumb,
+  thumbSkeleton: dom.overlayThumbSkeleton,
+  disc: dom.overlayDisc,
+});
+const playlistRenderer = new PlaylistRenderer({
+  body: dom.listBody,
+  gaugeFill: dom.gaugeFill,
+  gaugeText: dom.gaugeText,
+});
+
+function debounce(fn, ms = 220) {
+  let t;
+  return (...a) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...a), ms);
+  };
+}
+
+function fmtTime(seconds) {
+  const s = Math.max(0, Math.floor(seconds || 0));
+  const m = Math.floor(s / 60);
+  const ss = s % 60;
+  return `${m}:${String(ss).padStart(2, "0")}`;
+}
+
+function esc(str) {
+  return String(str).replace(/[&<>"']/g, (m) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[m]);
+}
+
+function isYouTubeUrl(str) {
+  try {
+    const u = new URL(str.trim());
+    const host = u.hostname.replace(/^www\./, "");
+    return (
+      host === "youtube.com" ||
+      host === "m.youtube.com" ||
+      host === "youtu.be" ||
+      host.endsWith(".youtube.com")
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+function youTubeIdFrom(input) {
   if (!input) return null;
   try {
     const u = new URL(input.trim());
-    const host = u.hostname.replace(/^www\./,'');
-    if (host==="youtu.be") return u.pathname.slice(1).slice(0,11);
-    if (host==="youtube.com" || host.endsWith(".youtube.com")) {
-      const v = u.searchParams.get("v"); if (v && v.length===11) return v;
-      const m = u.pathname.match(/^\/(shorts|embed)\/([A-Za-z0-9_-]{11})/); if (m) return m[2];
+    const host = u.hostname.replace(/^www\./, "");
+    if (host === "youtu.be") return u.pathname.slice(1).slice(0, 11);
+    if (host === "youtube.com" || host.endsWith(".youtube.com")) {
+      const v = u.searchParams.get("v");
+      if (v && v.length === 11) return v;
+      const m = u.pathname.match(/^\/(shorts|embed)\/([A-Za-z0-9_-]{11})/);
+      if (m) return m[2];
     }
-  } catch {}
+  } catch (e) {
+    // ignore
+  }
   const m = String(input).match(/(?:youtu\.be\/|v=|shorts\/|embed\/)([A-Za-z0-9_-]{11})/);
   return m ? m[1] : null;
 }
-function keyFor(url){ return youTubeIdFrom(url) || url.trim(); }
 
-function setButtonsEnabled(on){
-  btnAdd.disabled = !on; btnMp3.disabled = !on; btnWav.disabled = !on;
+function keyFor(url) {
+  return youTubeIdFrom(url) || url.trim();
 }
-function showThumbById(id){
-  if (!id) { hideThumb(); return; }
 
-  // show wrapper immediately (skeleton optional)
-  if (thumbWrap) thumbWrap.classList.add("show");
-  if (thumbSkelEl) thumbSkelEl.style.display = "block";
-  thumbEl.style.display = "none";
+function makeToken() {
+  return `tmp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+}
 
-  // use your proxy route (or swap to i.ytimg.com if you prefer)
-  const src = `/thumb/${id}?t=${Date.now()}`;
+function setButtonsEnabled(on) {
+  dom.btnAdd.disabled = !on;
+  dom.btnMp3.disabled = !on;
+  dom.btnWav.disabled = !on;
+}
 
-  thumbEl.onload = () => {
-    thumbEl.style.display = "block";
-    if (thumbSkelEl) thumbSkelEl.style.display = "none";
-    if (thumbWrap) thumbWrap.classList.add("show"); // ensure visible
+function updateActionButtons() {
+  const hasItems = state.server.items.length > 0;
+  dom.downloadZipBtn.disabled = !hasItems;
+  dom.clearBtn.disabled = !hasItems && state.optimisticAdds.length === 0;
+}
+
+function showThumbById(id) {
+  if (!dom.thumb || !dom.thumbWrap) return;
+  if (!id) {
+    hideThumb();
+    return;
+  }
+
+  dom.thumbWrap.classList.add("show");
+  if (dom.thumbSkeleton) dom.thumbSkeleton.style.display = "block";
+  dom.thumb.style.display = "none";
+
+  dom.thumb.onload = () => {
+    dom.thumb.style.display = "block";
+    if (dom.thumbSkeleton) dom.thumbSkeleton.style.display = "none";
+    dom.thumbWrap.classList.add("show");
   };
-  thumbEl.onerror = () => { hideThumb(); };
-
-  // guard against zero-height edge cases
-  thumbEl.style.minHeight = "1px";
-  thumbEl.src = src;
+  dom.thumb.onerror = hideThumb;
+  dom.thumb.style.minHeight = "1px";
+  dom.thumb.src = `/thumb/${id}?t=${Date.now()}`;
 }
 
-function hideThumb(){
-  if (thumbEl) { thumbEl.removeAttribute("src"); thumbEl.style.display = "none"; }
-  if (thumbSkelEl) thumbSkelEl.style.display = "none";
-  if (thumbWrap) thumbWrap.classList.remove("show");
+function hideThumb() {
+  if (dom.thumb) {
+    dom.thumb.removeAttribute("src");
+    dom.thumb.style.display = "none";
+  }
+  if (dom.thumbSkeleton) dom.thumbSkeleton.style.display = "none";
+  if (dom.thumbWrap) dom.thumbWrap.classList.remove("show");
 }
 
-function setPickedNoteIdle(){
-  pickedNoteEl.textContent = "We’ll auto-pick the best source (Opus > AAC, ≥ 44 kHz).";
+function setPickedNoteIdle() {
+  if (!dom.pickedNote) return;
+  dom.pickedNote.textContent = "We’ll auto-pick the best source (Opus > AAC, ≥ 44 kHz).";
 }
-function setPickedNotePicked(bf){
-  if (!bf) return setPickedNoteIdle();
-  const abr = bf.abr ? `${bf.abr} kbps` : (bf.tbr ? `${Math.round(bf.tbr)} kbps` : "—");
+
+function setPickedNotePicked(bf) {
+  if (!dom.pickedNote) return;
+  if (!bf) {
+    setPickedNoteIdle();
+    return;
+  }
+  const abr = bf.abr ? `${bf.abr} kbps` : bf.tbr ? `${Math.round(bf.tbr)} kbps` : "—";
   const asr = bf.asr ? `${bf.asr} Hz` : "—";
-  pickedNoteEl.innerHTML = `Picked: <strong>${esc(bf.acodec || "")}</strong> · ${esc(abr)} · ${esc(asr)} · id <code>${esc(bf.id)}</code>`;
-}
-function setPickedNoteError(msg){ pickedNoteEl.innerHTML = `<span style="color:#ff8a8a">${esc(msg)}</span>`; }
-
-function startOverlay(){
-  overlay.style.display = "grid";
-}
-function stopOverlay(){
-  overlay.style.display = "none";
-}
-setInterval(()=>{ dotsTick=(dotsTick+1)%4; const d=document.getElementById("dots"); if (d) d.textContent=".".repeat(dotsTick); }, 400);
-
-function makeToken(){ return `tmp_${Date.now()}_${Math.random().toString(36).slice(2,7)}`; }
-
-// ---------- rendering ----------
-function renderServerRows(){
-  listBody.innerHTML = "";
-  for (const it of (lastServerState.items || [])){
-    const tr = document.createElement("tr");
-
-    const tdTitle = document.createElement("td");
-    tdTitle.textContent = it.title;
-    tr.appendChild(tdTitle);
-
-    const tdDur   = document.createElement("td");
-    tdDur.className = "colDur";
-    tdDur.textContent = fmtTime(it.duration);
-    tr.appendChild(tdDur);
-
-    const tdAct   = document.createElement("td");
-    tdAct.className = "colAct";
-    tdAct.innerHTML = `<button class="action danger" data-id="${it.id}">Remove</button>`;
-    tr.appendChild(tdAct);
-
-    listBody.appendChild(tr);
-  }
-  // wire removes
-  [...document.querySelectorAll("button[data-id]")].forEach(btn=>{
-    btn.onclick = async () => { await fetch(`/api/remove/${btn.dataset.id}`, { method:"POST" }); await refresh(); };
-  });
-  // optimistic rows (prepend)
-  for (const o of optimistic){
-    if (!o.el){
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${esc(o.title || "Loading…")}</td>
-        <td class="colDur">${o.duration ? fmtTime(o.duration) : "—"}</td>
-        <td class="colAct"><span class="subtle">Adding…</span> <button class="action danger" data-otk="${o.token}">Remove</button></td>
-      `;
-      o.el = tr;
-    } else {
-      o.el.children[0].textContent = o.title || "Loading…";
-      o.el.children[1].textContent = o.duration ? fmtTime(o.duration) : "—";
-    }
-    listBody.prepend(o.el);
-  }
-  // optimistic remove
-  [...document.querySelectorAll("button[data-otk]")].forEach(btn=>{
-    btn.onclick = () => {
-      const tok = btn.dataset.otk;
-      const idx = optimistic.findIndex(x => x.token === tok);
-      if (idx !== -1) {
-        optimistic[idx].el?.remove();
-        optimistic.splice(idx, 1);
-        updateGauge();
-      }
-    };
-  });
+  dom.pickedNote.innerHTML = `Picked: <strong>${esc(bf.acodec || "")}</strong> · ${esc(abr)} · ${esc(asr)} · id <code>${esc(bf.id)}</code>`;
 }
 
-function updateGauge(){
-  const cap = lastServerState.capSeconds || (80*60);
-  const optimisticSeconds = optimistic.reduce((a,o)=> a + (o.duration || 0), 0);
-  const used = (lastServerState.totalSeconds || 0) + optimisticSeconds;
-
-  const pct = Math.min(100, Math.round((used/cap)*100));
-  gaugeFill.style.width = pct + "%";
-  gaugeText.textContent = `${fmtTime(used)} / ${fmtTime(cap)}`;
-  gaugeFill.style.opacity = used > cap ? "0.6" : "1";
-  gaugeFill.style.filter  = used > cap ? "grayscale(1)" : "none";
+function setPickedNoteError(msg) {
+  if (!dom.pickedNote) return;
+  dom.pickedNote.innerHTML = `<span style="color:#ff8a8a">${esc(msg)}</span>`;
 }
 
-async function refresh(){
+function syncUI() {
+  playlistRenderer.render(state.server, state.optimisticAdds);
+  updateActionButtons();
+}
+
+async function refresh() {
   const r = await fetch("/api/list");
-  lastServerState = await r.json();
-  renderServerRows();
-  updateGauge();
+  state.server = await r.json();
+  if (!Array.isArray(state.server.items)) state.server.items = [];
+  syncUI();
 }
 
-// ---------- API helpers ----------
+function updateOptimisticEntry(token, patch) {
+  const entry = state.optimisticAdds.find((o) => o.token === token);
+  if (!entry) return;
+  Object.assign(entry, patch);
+  syncUI();
+}
+
+function removeOptimisticEntry(token) {
+  const idx = state.optimisticAdds.findIndex((o) => o.token === token);
+  if (idx === -1) return;
+  state.optimisticAdds.splice(idx, 1);
+  syncUI();
+}
+
 async function probe(url, { fast = false } = {}) {
   const r = await fetch("/api/probe", {
-    method:"POST",
-    headers:{ "Content-Type":"application/json" },
-    body: JSON.stringify({ url, fast })
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, fast }),
   });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
-// ---------- Background probe orchestration (silent) ----------
-async function ensureBackgroundProbe(url){
+async function ensureBackgroundProbe(url) {
   const key = keyFor(url);
   if (!key) return;
   let entry = probeCache.get(key);
-  if (!entry) { entry = { pendingFast:false, pendingSmart:false }; probeCache.set(key, entry); }
+  if (!entry) {
+    entry = { pendingFast: false, pendingSmart: false };
+    probeCache.set(key, entry);
+  }
 
-  // Fast (web) — quickest title/duration
-  if (!entry.fast && !entry.pendingFast){
+  if (!entry.fast && !entry.pendingFast) {
     entry.pendingFast = true;
     probe(url, { fast: true })
-      .then(d => { entry.fast = d; entry.pendingFast = false; entry.ts = Date.now(); })
-      .catch(()=>{ entry.pendingFast = false; });
+      .then((d) => {
+        entry.fast = d;
+        entry.pendingFast = false;
+        entry.ts = Date.now();
+      })
+      .catch(() => {
+        entry.pendingFast = false;
+      });
   }
-  // Smart (parallel server-side) — richer formats
-  if (!entry.smart && !entry.pendingSmart){
+
+  if (!entry.smart && !entry.pendingSmart) {
     entry.pendingSmart = true;
     probe(url, { fast: false })
-      .then(d => { entry.smart = d; entry.pendingSmart = false; entry.ts = Date.now(); })
-      .catch(()=>{ entry.pendingSmart = false; });
+      .then((d) => {
+        entry.smart = d;
+        entry.pendingSmart = false;
+        entry.ts = Date.now();
+      })
+      .catch(() => {
+        entry.pendingSmart = false;
+      });
   }
 }
 
-// ---------- Add To CD (optimistic, uses cache first) ----------
-btnAdd.addEventListener("click", async () => {
-  const url = urlEl.value.trim();
+function bestCachedData(url) {
+  const key = keyFor(url);
+  if (!key) return null;
+  const cache = probeCache.get(key);
+  return cache?.smart || cache?.fast || null;
+}
+
+function buildThumbSources(items) {
+  return items
+    .map((item) => {
+      if (item?.videoId) return `/thumb/${item.videoId}`;
+      if (item?.thumbnail) return item.thumbnail;
+      return null;
+    })
+    .filter(Boolean)
+    .map((src, idx) => `${src}${src.includes("?") ? "&" : "?"}t=${Date.now() + idx}`);
+}
+
+async function handleAddToCd() {
+  const url = dom.url.value.trim();
   if (!url) return;
 
-  // Hide thumb and create instant placeholder
   hideThumb();
   const token = makeToken();
-  const opt = { token, title: "Loading…", duration: 0, el: null };
-  optimistic.push(opt);
-  renderServerRows();
-  updateGauge();
+  const optimistic = { token, title: "Loading…", duration: 0 };
+  state.optimisticAdds.push(optimistic);
+  syncUI();
 
-  // keep input free for next paste
-  urlEl.value = "";
-  urlEl.focus();
+  dom.url.value = "";
+  dom.url.focus();
 
-  // Use cached probe if available (prefer smart > fast)
-  const key = keyFor(url);
-  const cache = key ? probeCache.get(key) : null;
-  let data = cache?.smart || cache?.fast || null;
-  let best = data?.bestFormat || null;
+  let data = bestCachedData(url);
+  let bestFormat = data?.bestFormat || null;
   let usedClient = data?.usedClient || null;
 
   if (data) {
-    opt.title = data.title || opt.title;
-    opt.duration = Number(data.duration || 0);
-    renderServerRows();
-    updateGauge();
+    updateOptimisticEntry(token, {
+      title: data.title || optimistic.title,
+      duration: Number(data.duration || 0),
+    });
   } else {
-    // fallback: quick fast probe (still silent; no UI text)
     try {
       data = await probe(url, { fast: true });
-      best = data.bestFormat || null;
+      bestFormat = data.bestFormat || null;
       usedClient = data.usedClient || null;
-      opt.title = data.title || opt.title;
-      opt.duration = Number(data.duration || 0);
-      renderServerRows();
-      updateGauge();
-      // keep cache warm
+      updateOptimisticEntry(token, {
+        title: data.title || optimistic.title,
+        duration: Number(data.duration || 0),
+      });
       ensureBackgroundProbe(url);
-    } catch {/* ignore; we'll still try to add */}
+    } catch (e) {
+      // ignore, we'll still try to add
+    }
   }
 
   try {
-    const payload = best
-      ? { url, format_id: best.id, client_token: token, used_client: usedClient || null }
+    const payload = bestFormat
+      ? {
+          url,
+          format_id: bestFormat.id,
+          client_token: token,
+          used_client: usedClient || null,
+        }
       : { url, client_token: token, used_client: usedClient || null };
 
     const r = await fetch("/api/add", {
-      method:"POST",
-      headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify(payload)
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
+
     if (!r.ok) throw new Error(await r.text());
-
-    const idx = optimistic.findIndex(x => x.token === token);
-    if (idx !== -1) { optimistic[idx].el?.remove(); optimistic.splice(idx, 1); }
+    removeOptimisticEntry(token);
     await refresh();
-
   } catch (e) {
     setPickedNoteError("Failed to add this link.");
-    const idx = optimistic.findIndex(x => x.token === token);
-    if (idx !== -1) { optimistic[idx].el?.remove(); optimistic.splice(idx, 1); }
-    updateGauge();
+    removeOptimisticEntry(token);
   }
-});
+}
 
-// ---------- One-off MP3/WAV (overlay shows instantly; uses cache if possible) ----------
-async function oneOffDownload(target){
-  const url = urlEl.value.trim();
+function describeFormat(bf) {
+  if (!bf) return "";
+  const parts = [];
+  if (bf.acodec) parts.push(String(bf.acodec).toUpperCase());
+  if (bf.abr) parts.push(`${bf.abr} kbps`);
+  if (bf.asr) parts.push(`${bf.asr} Hz`);
+  if (bf.id) parts.push(`id ${bf.id}`);
+  return parts.join(" · ");
+}
+
+async function oneOffDownload(target) {
+  const url = dom.url.value.trim();
   if (!url) return;
 
-  // Overlay immediately with neutral message (no "analyzing" cue)
-  const loaderTextEl = document.querySelector(".loaderText");
-  loaderTextEl.innerHTML = `Preparing your file<span id="dots">.</span>`;
-  startOverlay();
+  const ytId = youTubeIdFrom(url);
+  const thumbSrc = ytId ? `/thumb/${ytId}?t=${Date.now()}` : null;
+  overlay.showConversion({
+    title: `Preparing your ${target.toUpperCase()}`,
+    subtitle: "",
+    thumbSrc,
+  });
+  dotsAnimator.start();
 
-  // Prefer cached smart > fast; if none, we can still call /api/convert without fmtId
-  const key = keyFor(url);
-  const cache = key ? probeCache.get(key) : null;
-  const cachedData = cache?.smart || cache?.fast || null;
+  const cached = bestCachedData(url);
+  let bestFormat = cached?.bestFormat || null;
 
-  // If cached format exists, show details right away
-  let bf = cachedData?.bestFormat || null;
-  if (bf) {
-    const abr = bf.abr ? `${bf.abr} kbps` : (bf.tbr ? `${Math.round(bf.tbr)} kbps` : "—");
-    const asr = bf.asr ? `${bf.asr} Hz` : "—";
-    loaderTextEl.innerHTML = `Preparing your file<span id="dots">.</span><br><span class="subtle">${esc(bf.acodec || "")} · ${esc(abr)} · ${esc(asr)} · id <code>${esc(bf.id)}</code></span>`;
+  if (bestFormat) {
+    overlay.setSubtitle(describeFormat(bestFormat));
   }
 
-  // If nothing cached yet, kick background probes (silent); we won’t wait to show text
-  if (!cachedData) ensureBackgroundProbe(url);
+  if (!cached) ensureBackgroundProbe(url);
 
-  try{
-    // Build request using whatever we know; server can still choose best if no fmtId
+  try {
     const body = {
       url,
       target,
-      format_id: bf?.id || undefined,
-      used_client: (cachedData && cachedData.usedClient) || null
+      format_id: bestFormat?.id || undefined,
+      used_client: cached?.usedClient || null,
     };
 
     const r = await fetch("/api/convert", {
-      method:"POST",
-      headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify(body)
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     });
 
     if (!r.ok) {
       const txt = await r.text();
       let msg = `Failed to get ${target.toUpperCase()}`;
-      let formats = null, chosen = null, picker = null;
+      let formats = null;
+      let chosen = null;
+      let picker = null;
       try {
         const j = JSON.parse(txt);
-        msg = `${j.error || 'Error'}: ${j.message || j.detail || msg}`;
+        msg = `${j.error || "Error"}: ${j.message || j.detail || msg}`;
         formats = j.formats || null;
-        chosen  = j.chosen  || null;
-        picker  = j.picker  || null;
-      } catch {}
+        chosen = j.chosen || null;
+        picker = j.picker || null;
+      } catch (err) {
+        // ignore
+      }
       if (formats && Array.isArray(formats) && formats.length) {
         const lines = formats
           .slice()
-          .sort((a,b) => (b.asr||0)-(a.asr||0) || (b.abr||0)-(a.abr||0))
-          .map(f => {
+          .sort((a, b) => (b.asr || 0) - (a.asr || 0) || (b.abr || 0) - (a.abr || 0))
+          .map((f) => {
             const parts = [
               `id ${f.id}`,
-              (f.vcodec ? `v=${String(f.vcodec)}` : ""),
-              (f.acodec ? `a=${String(f.acodec)}` : ""),
-              (f.asr ? `${f.asr}Hz` : ""),
-              (typeof f.abr==="number" ? `${f.abr}kbps` : (typeof f.tbr==="number" ? `${Math.round(f.tbr)}kbps` : "")),
-              (f.ext ? f.ext : ""),
-              (f.note ? `(${f.note})` : "")
+              f.vcodec ? `v=${String(f.vcodec)}` : "",
+              f.acodec ? `a=${String(f.acodec)}` : "",
+              f.asr ? `${f.asr}Hz` : "",
+              typeof f.abr === "number"
+                ? `${f.abr}kbps`
+                : typeof f.tbr === "number"
+                ? `${Math.round(f.tbr)}kbps`
+                : "",
+              f.ext || "",
+              f.note ? `(${f.note})` : "",
             ].filter(Boolean);
             return "• " + parts.join(" · ");
           })
           .join("\n");
-        pickedNoteEl.innerHTML =
-          `<div class="fmt-debug">
-             <div style="color:#ff8a8a; margin-bottom:6px;">${esc(msg)}${picker ? `<br><span class="subtle">${esc(picker)}</span>` : ""}</div>
-             ${chosen ? `<div class="subtle">Tried format: <code>${esc(chosen.id)}</code> (${esc(chosen.acodec||"")}, ${chosen.asr||"?"}Hz, ${chosen.abr||"?"}kbps)</div>` : ""}
-             <details open>
-               <summary>Available formats (${formats.length})</summary>
-               <pre class="fmt-pre">${esc(lines)}</pre>
-             </details>
-           </div>`;
+        if (dom.pickedNote) {
+          dom.pickedNote.innerHTML = `
+            <div class="fmt-debug">
+              <div style="color:#ff8a8a; margin-bottom:6px;">${esc(msg)}${
+            picker ? `<br><span class="subtle">${esc(picker)}</span>` : ""
+          }</div>
+              ${
+                chosen
+                  ? `<div class="subtle">Tried format: <code>${esc(chosen.id)}</code> (${esc(
+                      chosen.acodec || ""
+                    )}, ${chosen.asr || "?"}Hz, ${chosen.abr || "?"}kbps)</div>`
+                  : ""
+              }
+              <details open>
+                <summary>Available formats (${formats.length})</summary>
+                <pre class="fmt-pre">${esc(lines)}</pre>
+              </details>
+            </div>`;
+        }
       } else {
         setPickedNoteError(msg);
       }
       return;
     }
 
-    // success: stream download
     const cd = r.headers.get("Content-Disposition") || "";
     const fn = /filename="([^"]+)"/.exec(cd)?.[1] || `audio.${target}`;
     const blob = await r.blob();
     const href = URL.createObjectURL(blob);
     const a = Object.assign(document.createElement("a"), { href, download: fn });
-    document.body.appendChild(a); a.click(); a.remove();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
     URL.revokeObjectURL(href);
-
-  } catch (e){
+  } catch (e) {
     setPickedNoteError(`Network error: ${e.message || e}`);
   } finally {
-    stopOverlay();
+    dotsAnimator.stop();
+    overlay.hide();
   }
 }
-btnMp3.addEventListener("click", () => oneOffDownload("mp3"));
-btnWav.addEventListener("click", () => oneOffDownload("wav"));
 
-// ---------- URL handling (silent background prefetch) ----------
-function onUrlChanged(){
-  const url = urlEl.value.trim();
+async function handleZipDownload() {
+  if (!state.server.items.length) return;
+
+  overlay.showZip({
+    title: "Bundling your CD",
+    subtitle: `${state.server.items.length} track${state.server.items.length === 1 ? "" : "s"} will be zipped.`,
+    thumbnails: buildThumbSources(state.server.items),
+  });
+  dotsAnimator.start();
+
+  try {
+    const r = await fetch("/api/zip");
+    if (!r.ok) {
+      const txt = await r.text();
+      setPickedNoteError(`Failed to create ZIP: ${txt || r.statusText}`);
+      return;
+    }
+    const cd = r.headers.get("Content-Disposition") || "";
+    const fn = /filename="([^"]+)"/.exec(cd)?.[1] || "cd-collection.zip";
+    const blob = await r.blob();
+    const href = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement("a"), { href, download: fn });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(href);
+  } catch (e) {
+    setPickedNoteError(`Failed to create ZIP: ${e.message || e}`);
+  } finally {
+    dotsAnimator.stop();
+    overlay.hide();
+  }
+}
+
+async function handleRemove(id) {
+  if (!id) return;
+  await fetch(`/api/remove/${id}`, { method: "POST" });
+  await refresh();
+}
+
+function handleCancel(token) {
+  removeOptimisticEntry(token);
+}
+
+async function handleClear() {
+  if (!confirm("Clear the whole list and delete files?")) return;
+  state.optimisticAdds.length = 0;
+  await fetch("/api/clear", { method: "POST" });
+  await refresh();
+}
+
+function onUrlChanged() {
+  const url = dom.url.value.trim();
   const valid = isYouTubeUrl(url);
   setButtonsEnabled(valid);
-  if (valid){
+  if (valid) {
     const id = youTubeIdFrom(url);
     if (id) showThumbById(id);
-    // kick off background probes silently
     ensureBackgroundProbe(url);
   } else {
     hideThumb();
   }
 }
-urlEl.addEventListener("input", debounce(onUrlChanged, 120));
-urlEl.addEventListener("paste", () => setTimeout(onUrlChanged, 0));
-urlEl.addEventListener("blur", onUrlChanged);
 
-// ---------- housekeeping ----------
-clearBtn.addEventListener("click", async () => {
-  if (!confirm("Clear the whole list and delete files?")) return;
-  optimistic.splice(0, optimistic.length);
-  await fetch("/api/clear", { method: "POST" });
-  await refresh();
+dom.btnAdd.addEventListener("click", handleAddToCd);
+dom.btnMp3.addEventListener("click", () => oneOffDownload("mp3"));
+dom.btnWav.addEventListener("click", () => oneOffDownload("wav"));
+dom.downloadZipBtn.addEventListener("click", handleZipDownload);
+dom.clearBtn.addEventListener("click", handleClear);
+
+dom.listBody.addEventListener("click", (event) => {
+  const target = event.target.closest("button[data-remove]");
+  if (target) {
+    handleRemove(target.dataset.remove);
+    return;
+  }
+  const cancel = event.target.closest("button[data-cancel]");
+  if (cancel) {
+    handleCancel(cancel.dataset.cancel);
+  }
 });
+
+dom.url.addEventListener("input", debounce(onUrlChanged, 120));
+dom.url.addEventListener("paste", () => setTimeout(onUrlChanged, 0));
+dom.url.addEventListener("blur", onUrlChanged);
 
 refresh();
 setPickedNoteIdle();
 setButtonsEnabled(false);
+updateActionButtons();
