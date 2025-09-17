@@ -5,6 +5,10 @@
   <title>CD Maker · YouTube → MP3/WAV</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="stylesheet" href="/styles.css" />
+
+  <!-- Prioritise thumbnail networking -->
+  <link rel="dns-prefetch" href="//i.ytimg.com">
+  <link rel="preconnect" href="https://i.ytimg.com" crossorigin>
 </head>
 <body>
   <main class="wrap">
@@ -19,10 +23,11 @@
 
       <!-- Thumbnail UNDER the input (hidden until a link is valid) -->
       <div class="thumbWrap">
-        <img id="thumb" class="thumb" alt="" decoding="async" />
+        <!-- important: eager + high fetch priority -->
+        <img id="thumb" class="thumb" alt=""
+             decoding="async" loading="eager" fetchpriority="high" referrerpolicy="no-referrer" />
         <div id="thumbSkeleton" class="thumb skeleton" style="display:none;"></div>
       </div>
-
 
       <!-- Centered buttons -->
       <div class="row actions">
@@ -31,10 +36,7 @@
         <button id="btnMp3" class="btn ghost" disabled>MP3</button>
         <button id="btnWav" class="btn ghost" disabled>WAV</button>
       </div>
-
-
     </section>
-
 
     <section class="panel">
       <div class="gauge">
@@ -59,7 +61,6 @@
     </section>
 
     <footer class="foot subtle">
-      <!--For personal use. Ensure you have the rights to process any content you convert.-->
       Made by JPsson
     </footer>
   </main>

@@ -1,10 +1,11 @@
+// ------ elements ------
 const urlEl        = document.getElementById("url");
 const btnAdd       = document.getElementById("btnAdd");
 const btnMp3       = document.getElementById("btnMp3");
 const btnWav       = document.getElementById("btnWav");
 const pickedNoteEl = document.getElementById("pickedNote");
 
-const thumbWrap = document.querySelector(".thumbWrap");
+const thumbWrap    = document.querySelector(".thumbWrap");
 const thumbEl      = document.getElementById("thumb");
 const thumbSkelEl  = document.getElementById("thumbSkeleton");
 
@@ -15,16 +16,17 @@ const clearBtn  = document.getElementById("clear");
 
 const overlay   = document.getElementById("overlay");
 
+// ------ state ------
 let dotsTick = 0;
-let lastServerState = { capSeconds: 80*60, totalSeconds: 0, items: [] }; // cache
-const optimistic = []; // { token, title, duration, el: <tr> }
+let lastServerState = { capSeconds: 80*60, totalSeconds: 0, items: [] };
+const optimistic = []; // { token, title, duration, el }
 
-// ===== Background probe cache =====
+// Background probe cache
 // key: videoId || normalized URL
 // value: { fast?: data, smart?: data, pendingFast?:bool, pendingSmart?:bool, ts:number }
 const probeCache = new Map();
 
-// ---------- helpers ----------
+// ------ utils ------
 function debounce(fn, ms=220){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); }; }
 function fmtTime(s){ s=Math.max(0,Math.floor(s||0)); const m=Math.floor(s/60), ss=s%60; return `${m}:${String(ss).padStart(2,"0")}`; }
 function esc(s){ return String(s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
@@ -54,27 +56,66 @@ function keyFor(url){ return youTubeIdFrom(url) || url.trim(); }
 function setButtonsEnabled(on){
   btnAdd.disabled = !on; btnMp3.disabled = !on; btnWav.disabled = !on;
 }
-function showThumbById(id){
-  if (!id) { hideThumb(); return; }
 
-  // show wrapper immediately (skeleton optional)
+// ---- THUMB: fastest possible client-side load ----
+function thumbCandidates(id){
+  // try WEBP first (fast), then richer JPGs
+  return [
+    `https://i.ytimg.com/vi_webp/${id}/hqdefault.webp`,
+    `https://i.ytimg.com/vi/${id}/maxresdefault.jpg`,
+    `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+    `https://i.ytimg.com/vi/${id}/sddefault.jpg`,
+    `https://i.ytimg.com/vi/${id}/0.jpg`,
+  ];
+}
+
+// optional: pre-warm with a <link rel="preload"> for the first candidate
+let lastPreload;
+function preloadThumb(id){
+  try {
+    if (lastPreload) lastPreload.remove();
+    const l = document.createElement("link");
+    l.rel = "preload";
+    l.as  = "image";
+    l.href = `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
+    l.crossOrigin = "anonymous";
+    document.head.appendChild(l);
+    lastPreload = l;
+  } catch {}
+}
+
+function showThumbById(id){
+  if (!id){ hideThumb(); return; }
+
+  // show wrapper instantly
   if (thumbWrap) thumbWrap.classList.add("show");
+
+  // skeleton immediately
   if (thumbSkelEl) thumbSkelEl.style.display = "block";
   thumbEl.style.display = "none";
 
-  // use your proxy route (or swap to i.ytimg.com if you prefer)
-  const src = `/thumb/${id}?t=${Date.now()}`;
+  // make sure browser gives this request priority
+  thumbEl.setAttribute("loading", "eager");
+  thumbEl.setAttribute("decoding", "async");
+  thumbEl.setAttribute("fetchpriority", "high");
+  thumbEl.referrerPolicy = "no-referrer";
 
-  thumbEl.onload = () => {
-    thumbEl.style.display = "block";
-    if (thumbSkelEl) thumbSkelEl.style.display = "none";
-    if (thumbWrap) thumbWrap.classList.add("show"); // ensure visible
+  const candidates = thumbCandidates(id);
+  let i = 0;
+
+  const tryNext = () => {
+    if (i >= candidates.length) { hideThumb(); return; }
+    const src = candidates[i++];
+    thumbEl.onload = () => {
+      thumbEl.style.display = "block";
+      if (thumbSkelEl) thumbSkelEl.style.display = "none";
+    };
+    thumbEl.onerror = tryNext;
+    // do NOT add cache-busters; CDN caching is your friend
+    thumbEl.src = src;
   };
-  thumbEl.onerror = () => { hideThumb(); };
 
-  // guard against zero-height edge cases
-  thumbEl.style.minHeight = "1px";
-  thumbEl.src = src;
+  tryNext();
 }
 
 function hideThumb(){
@@ -83,28 +124,27 @@ function hideThumb(){
   if (thumbWrap) thumbWrap.classList.remove("show");
 }
 
+// ------ picked note helpers (unchanged behaviour) ------
 function setPickedNoteIdle(){
-  pickedNoteEl.textContent = "We’ll auto-pick the best source (Opus > AAC, ≥ 44 kHz).";
+  if (pickedNoteEl) pickedNoteEl.textContent = "We’ll auto-pick the best source (Opus > AAC, ≥ 44 kHz).";
 }
 function setPickedNotePicked(bf){
+  if (!pickedNoteEl) return;
   if (!bf) return setPickedNoteIdle();
   const abr = bf.abr ? `${bf.abr} kbps` : (bf.tbr ? `${Math.round(bf.tbr)} kbps` : "—");
   const asr = bf.asr ? `${bf.asr} Hz` : "—";
   pickedNoteEl.innerHTML = `Picked: <strong>${esc(bf.acodec || "")}</strong> · ${esc(abr)} · ${esc(asr)} · id <code>${esc(bf.id)}</code>`;
 }
-function setPickedNoteError(msg){ pickedNoteEl.innerHTML = `<span style="color:#ff8a8a">${esc(msg)}</span>`; }
+function setPickedNoteError(msg){ if (pickedNoteEl) pickedNoteEl.innerHTML = `<span style="color:#ff8a8a">${esc(msg)}</span>`; }
 
-function startOverlay(){
-  overlay.style.display = "grid";
-}
-function stopOverlay(){
-  overlay.style.display = "none";
-}
+// ------ overlay ------
+function startOverlay(){ overlay.style.display = "grid"; }
+function stopOverlay(){ overlay.style.display = "none"; }
 setInterval(()=>{ dotsTick=(dotsTick+1)%4; const d=document.getElementById("dots"); if (d) d.textContent=".".repeat(dotsTick); }, 400);
 
 function makeToken(){ return `tmp_${Date.now()}_${Math.random().toString(36).slice(2,7)}`; }
 
-// ---------- rendering ----------
+// ------ render list/gauge ------
 function renderServerRows(){
   listBody.innerHTML = "";
   for (const it of (lastServerState.items || [])){
@@ -179,7 +219,7 @@ async function refresh(){
   updateGauge();
 }
 
-// ---------- API helpers ----------
+// ------ API helpers ------
 async function probe(url, { fast = false } = {}) {
   const r = await fetch("/api/probe", {
     method:"POST",
@@ -190,7 +230,7 @@ async function probe(url, { fast = false } = {}) {
   return r.json();
 }
 
-// ---------- Background probe orchestration (silent) ----------
+// ------ Background probe orchestration (silent) ------
 async function ensureBackgroundProbe(url){
   const key = keyFor(url);
   if (!key) return;
@@ -213,7 +253,7 @@ async function ensureBackgroundProbe(url){
   }
 }
 
-// ---------- Add To CD (optimistic, uses cache first) ----------
+// ------ Add To CD (optimistic, uses cache first) ------
 btnAdd.addEventListener("click", async () => {
   const url = urlEl.value.trim();
   if (!url) return;
@@ -243,7 +283,7 @@ btnAdd.addEventListener("click", async () => {
     renderServerRows();
     updateGauge();
   } else {
-    // fallback: quick fast probe (still silent; no UI text)
+    // fallback: quick fast probe (silent)
     try {
       data = await probe(url, { fast: true });
       best = data.bestFormat || null;
@@ -281,12 +321,12 @@ btnAdd.addEventListener("click", async () => {
   }
 });
 
-// ---------- One-off MP3/WAV (overlay shows instantly; uses cache if possible) ----------
+// ------ One-off MP3/WAV (overlay shows instantly; uses cache if possible) ------
 async function oneOffDownload(target){
   const url = urlEl.value.trim();
   if (!url) return;
 
-  // Overlay immediately with neutral message (no "analyzing" cue)
+  // Overlay immediately (no analyzing copy)
   const loaderTextEl = document.querySelector(".loaderText");
   loaderTextEl.innerHTML = `Preparing your file<span id="dots">.</span>`;
   startOverlay();
@@ -304,11 +344,10 @@ async function oneOffDownload(target){
     loaderTextEl.innerHTML = `Preparing your file<span id="dots">.</span><br><span class="subtle">${esc(bf.acodec || "")} · ${esc(abr)} · ${esc(asr)} · id <code>${esc(bf.id)}</code></span>`;
   }
 
-  // If nothing cached yet, kick background probes (silent); we won’t wait to show text
+  // If nothing cached yet, kick background probes (silent)
   if (!cachedData) ensureBackgroundProbe(url);
 
   try{
-    // Build request using whatever we know; server can still choose best if no fmtId
     const body = {
       url,
       target,
@@ -350,7 +389,7 @@ async function oneOffDownload(target){
             return "• " + parts.join(" · ");
           })
           .join("\n");
-        pickedNoteEl.innerHTML =
+        pickedNoteEl && (pickedNoteEl.innerHTML =
           `<div class="fmt-debug">
              <div style="color:#ff8a8a; margin-bottom:6px;">${esc(msg)}${picker ? `<br><span class="subtle">${esc(picker)}</span>` : ""}</div>
              ${chosen ? `<div class="subtle">Tried format: <code>${esc(chosen.id)}</code> (${esc(chosen.acodec||"")}, ${chosen.asr||"?"}Hz, ${chosen.abr||"?"}kbps)</div>` : ""}
@@ -358,7 +397,7 @@ async function oneOffDownload(target){
                <summary>Available formats (${formats.length})</summary>
                <pre class="fmt-pre">${esc(lines)}</pre>
              </details>
-           </div>`;
+           </div>`);
       } else {
         setPickedNoteError(msg);
       }
@@ -383,25 +422,30 @@ async function oneOffDownload(target){
 btnMp3.addEventListener("click", () => oneOffDownload("mp3"));
 btnWav.addEventListener("click", () => oneOffDownload("wav"));
 
-// ---------- URL handling (silent background prefetch) ----------
+// ------ URL handling (silent background prefetch) ------
 function onUrlChanged(){
   const url = urlEl.value.trim();
   const valid = isYouTubeUrl(url);
   setButtonsEnabled(valid);
+
   if (valid){
     const id = youTubeIdFrom(url);
-    if (id) showThumbById(id);
+    if (id) {
+      // thumbnail priority: preload + show immediately
+      preloadThumb(id);
+      showThumbById(id);
+    }
     // kick off background probes silently
     ensureBackgroundProbe(url);
   } else {
     hideThumb();
   }
 }
-urlEl.addEventListener("input", debounce(onUrlChanged, 120));
+urlEl.addEventListener("input", debounce(onUrlChanged, 80)); // slightly snappier
 urlEl.addEventListener("paste", () => setTimeout(onUrlChanged, 0));
 urlEl.addEventListener("blur", onUrlChanged);
 
-// ---------- housekeeping ----------
+// ------ housekeeping ------
 clearBtn.addEventListener("click", async () => {
   if (!confirm("Clear the whole list and delete files?")) return;
   optimistic.splice(0, optimistic.length);
