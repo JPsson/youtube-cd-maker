@@ -380,7 +380,7 @@ code {
 @media (min-width: 1280px) {
   .wrap { max-width: 1200px; }           /* gentle bump at big widths */
   #url { width: min(760px, calc(100% - 32px)); }
-  .thumbWrap { width: clamp(300px, 40vw, 560px); }
+  .thumbWrap { width: clamp(300px, 40vw, 420px); }
 }
 
 /* prevent accidental text selection on quick clicks */
