@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "nanoid": "^5.0.7"
+    "nanoid": "^5.0.7",
+    "zip": "^1.2.0"
   }
 }
