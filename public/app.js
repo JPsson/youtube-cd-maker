@@ -20,12 +20,18 @@ const dom = {
   overlayThumb: document.getElementById("overlayThumb"),
   overlayThumbSkeleton: document.getElementById("overlayThumbSkeleton"),
   overlayDisc: document.getElementById("overlayDisc"),
+  disclaimerLink: document.getElementById("disclaimerLink"),
+  disclaimerOverlay: document.getElementById("disclaimerOverlay"),
+  disclaimerClose: document.getElementById("disclaimerClose"),
 };
 
 const state = {
   server: { capSeconds: 80 * 60, totalSeconds: 0, items: [] },
   optimisticAdds: [],
 };
+
+const pendingAddRequests = new Map();
+let lastDisclaimerTrigger = null;
 
 const probeCache = new Map(); // key -> { fast, smart, pendingFast, pendingSmart, ts }
 
@@ -492,11 +498,11 @@ function updateOptimisticEntry(token, patch) {
   syncUI();
 }
 
-function removeOptimisticEntry(token) {
+function removeOptimisticEntry(token, { silent = false } = {}) {
   const idx = state.optimisticAdds.findIndex((o) => o.token === token);
   if (idx === -1) return;
   state.optimisticAdds.splice(idx, 1);
-  syncUI();
+  if (!silent) syncUI();
 }
 
 async function probe(url, { fast = false } = {}) {
@@ -575,6 +581,7 @@ async function handleAddToCd() {
 
   dom.url.value = "";
   dom.url.focus();
+  setButtonsEnabled(false);
 
   let data = bestCachedData(url);
   let bestFormat = data?.bestFormat || null;
@@ -600,6 +607,9 @@ async function handleAddToCd() {
     }
   }
 
+  const controller = new AbortController();
+  pendingAddRequests.set(token, controller);
+
   try {
     const payload = bestFormat
       ? {
@@ -614,14 +624,52 @@ async function handleAddToCd() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     });
 
     if (!r.ok) throw new Error(await r.text());
-    removeOptimisticEntry(token);
+    const resBody = await r.json();
+
+    if (resBody?.canceled) {
+      removeOptimisticEntry(token, { silent: true });
+      syncUI();
+      return;
+    }
+
+    removeOptimisticEntry(token, { silent: true });
+
+    if (resBody?.item) {
+      if (!Array.isArray(state.server.items)) state.server.items = [];
+      const items = state.server.items;
+      const existingIdx = items.findIndex((entry) => entry?.id === resBody.item.id);
+      if (existingIdx !== -1) {
+        items.splice(existingIdx, 1);
+      }
+      items.push(resBody.item);
+      if (typeof resBody.totalSeconds === "number") {
+        state.server.totalSeconds = resBody.totalSeconds;
+      }
+      if (typeof resBody.capSeconds === "number") {
+        state.server.capSeconds = resBody.capSeconds;
+      }
+      syncUI();
+      return;
+    }
+
     await refresh();
   } catch (e) {
+    if (controller.signal.aborted) {
+      const stillPending = state.optimisticAdds.some((o) => o.token === token);
+      if (stillPending) {
+        removeOptimisticEntry(token, { silent: true });
+        syncUI();
+      }
+      return;
+    }
     setPickedNoteError("Failed to add this link.");
     removeOptimisticEntry(token);
+  } finally {
+    pendingAddRequests.delete(token);
   }
 }
 
@@ -790,7 +838,16 @@ async function handleRemove(id) {
 }
 
 function handleCancel(token) {
+  if (!token) return;
+  const controller = pendingAddRequests.get(token);
+  if (controller) controller.abort();
   removeOptimisticEntry(token);
+  fetch("/api/cancel-add", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+    keepalive: true,
+  }).catch(() => {});
 }
 
 async function handleClear() {
@@ -813,11 +870,60 @@ function onUrlChanged() {
   }
 }
 
+function setDisclaimerVisibility(show) {
+  if (!dom.disclaimerOverlay) return;
+  const isShown = Boolean(show);
+  dom.disclaimerOverlay.hidden = !isShown;
+  dom.disclaimerOverlay.setAttribute("aria-hidden", isShown ? "false" : "true");
+  if (dom.disclaimerLink) {
+    dom.disclaimerLink.setAttribute("aria-expanded", isShown ? "true" : "false");
+  }
+
+  if (isShown) {
+    lastDisclaimerTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : dom.disclaimerLink;
+    const focusTarget =
+      (dom.disclaimerClose && typeof dom.disclaimerClose.focus === "function"
+        ? dom.disclaimerClose
+        : dom.disclaimerOverlay.querySelector(
+            'button, [href], [tabindex]:not([tabindex="-1"])'
+          )) || null;
+    focusTarget?.focus?.();
+  } else if (lastDisclaimerTrigger && typeof lastDisclaimerTrigger.focus === "function") {
+    lastDisclaimerTrigger.focus();
+    lastDisclaimerTrigger = null;
+  }
+}
+
 dom.btnAdd.addEventListener("click", handleAddToCd);
 dom.btnMp3.addEventListener("click", () => oneOffDownload("mp3"));
 dom.btnWav.addEventListener("click", () => oneOffDownload("wav"));
 dom.downloadZipBtn.addEventListener("click", handleZipDownload);
 dom.clearBtn.addEventListener("click", handleClear);
+
+if (dom.disclaimerLink) {
+  dom.disclaimerLink.addEventListener("click", (event) => {
+    event.preventDefault();
+    setDisclaimerVisibility(true);
+  });
+}
+
+if (dom.disclaimerClose) {
+  dom.disclaimerClose.addEventListener("click", () => setDisclaimerVisibility(false));
+}
+
+if (dom.disclaimerOverlay) {
+  dom.disclaimerOverlay.addEventListener("click", (event) => {
+    if (event.target === dom.disclaimerOverlay) {
+      setDisclaimerVisibility(false);
+    }
+  });
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && dom.disclaimerOverlay && !dom.disclaimerOverlay.hidden) {
+    setDisclaimerVisibility(false);
+  }
+});
 
 dom.listBody.addEventListener("click", (event) => {
   const target = event.target.closest("button[data-remove]");

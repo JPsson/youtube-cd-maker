@@ -42,10 +42,20 @@ body {
 
 h1 {
   margin: 0;
-  text-align: center; 
+  text-align: center;
   font-weight: 700;
   letter-spacing: 0.3px;
   font-size: 28px;
+}
+
+.brandMark {
+  display: block;
+  width: clamp(180px, 42vw, 360px);
+  max-width: 100%;
+  margin: 0 auto;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.45);
 }
 
 .subtle { color: var(--muted); }
@@ -142,6 +152,26 @@ h1 {
 }
 .btn.ghost.alt:hover { background: #1b1b20; }
 .btn.ghost.alt:disabled { background: transparent; }
+
+.disclaimerLink {
+  position: fixed;
+  left: 18px;
+  bottom: 18px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  z-index: 9500;
+}
+
+.disclaimerLink:hover,
+.disclaimerLink:focus-visible {
+  color: var(--text);
+}
 
 /* Small "or" between Add and format buttons */
 .or {
@@ -366,6 +396,51 @@ code {
 .overlayDisc img:nth-child(odd) { filter: saturate(1.15); }
 .overlayDisc img:nth-child(even) { filter: contrast(1.1); }
 
+.infoOverlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 15, 16, 0.92);
+  z-index: 9998;
+  padding: 24px;
+}
+
+.infoOverlay[hidden] { display: none; }
+
+.infoOverlay__card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: clamp(20px, 4vw, 32px);
+  width: min(520px, calc(100vw - 48px));
+  display: grid;
+  gap: 16px;
+  box-shadow: 0 22px 48px rgba(0, 0, 0, 0.45);
+}
+
+.infoOverlay__card h2 {
+  margin: 0;
+  font-size: clamp(20px, 2.6vw, 24px);
+  letter-spacing: 0.02em;
+}
+
+.infoOverlay__card p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.infoOverlay__card p + p {
+  margin-top: 6px;
+}
+
+.infoOverlay__card .btn {
+  justify-self: end;
+  min-width: 120px;
+}
+
 .listActions {
   margin-top: 16px;
   display: flex;
@@ -381,6 +456,13 @@ code {
   .wrap { max-width: 1200px; }           /* gentle bump at big widths */
   #url { width: min(760px, calc(100% - 32px)); }
   .thumbWrap { width: clamp(300px, 40vw, 420px); }
+}
+
+@media (max-width: 640px) {
+  .disclaimerLink {
+    left: 12px;
+    bottom: 12px;
+  }
 }
 
 /* prevent accidental text selection on quick clicks */
