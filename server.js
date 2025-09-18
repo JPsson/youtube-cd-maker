@@ -60,6 +60,21 @@ class PlaylistStore {
     return this.items.find((t) => t.id === id) || null;
   }
 
+  reorder(orderIds) {
+    if (!Array.isArray(orderIds)) return false;
+    if (orderIds.length !== this.items.length) return false;
+
+    const uniq = new Set(orderIds);
+    if (uniq.size !== orderIds.length) return false;
+
+    const map = new Map(this.items.map((item) => [item.id, item]));
+    if (orderIds.some((id) => !map.has(id))) return false;
+
+    const next = orderIds.map((id) => map.get(id));
+    this.items.splice(0, this.items.length, ...next);
+    return true;
+  }
+
   toJSON() {
     return {
       capSeconds: this.capSeconds,
@@ -192,6 +207,24 @@ function safeBase(title) {
     .trim()
     .slice(0, 120);
   return s || "audio";
+}
+
+function normalizeForZip(title) {
+  const base = String(title || "")
+    .replace(/[\u0000-\u001f]+/g, "")
+    .replace(/[\\/:*?"<>|=]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[. ]+$/g, "");
+  return base.slice(0, 180).replace(/[. ]+$/g, "");
+}
+
+function formatZipEntryName(title, index, total, ext) {
+  const digits = String(Math.max(total, 1)).length;
+  const prefix = String(index).padStart(digits, "0");
+  const cleanTitle = normalizeForZip(title) || `Track ${index}`;
+  const cleanExt = ext && ext.startsWith(".") ? ext : ext ? `.${ext}` : "";
+  return `${prefix} ${cleanTitle}${cleanExt}`;
 }
 
 // ---------- Metadata ----------
@@ -392,6 +425,20 @@ app.post("/api/remove/:id", async (req, res) => {
   });
 });
 
+app.post("/api/reorder", (req, res) => {
+  const { order } = req.body || {};
+  if (!Array.isArray(order)) {
+    return res.status(400).json({ error: "Missing order" });
+  }
+
+  const ok = playlistStore.reorder(order);
+  if (!ok) {
+    return res.status(400).json({ error: "Order mismatch" });
+  }
+
+  res.json({ ok: true, totalSeconds: playlistStore.totalSeconds, capSeconds: playlistStore.capSeconds });
+});
+
 app.get("/api/file/:id", (req, res) => {
   const item = playlistStore.find(req.params.id);
   if (!item) return res.status(404).end();
@@ -406,17 +453,40 @@ app.get("/api/zip", async (_req, res) => {
     return res.status(500).json({ error: "ZIP utility not available" });
   }
 
-  const files = playlistStore.items
-    .map((item) => item?.filepath)
-    .filter((filePath) => filePath && fs.existsSync(filePath));
+  const entries = playlistStore.items
+    .map((item, idx) => {
+      if (!item?.filepath) return null;
+      if (!fs.existsSync(item.filepath)) return null;
+      const ext = path.extname(item.filepath) || ".mp3";
+      const archiveName = formatZipEntryName(item.title, idx + 1, playlistStore.items.length, ext);
+      return { archiveName, filePath: item.filepath };
+    })
+    .filter(Boolean);
 
-  if (!files.length) {
+  if (!entries.length) {
     return res.status(400).json({ error: "No files available to zip" });
   }
 
+  const stagingDir = await fsp.mkdtemp(path.join(config.tmpDir, "zip-stage-"));
+  const stagedFiles = [];
+
   try {
+    for (const entry of entries) {
+      const stagedPath = path.join(stagingDir, entry.archiveName);
+      try {
+        await fsp.link(entry.filePath, stagedPath);
+      } catch (err) {
+        if (err?.code === "EXDEV" || err?.code === "EEXIST") {
+          await fsp.copyFile(entry.filePath, stagedPath);
+        } else {
+          throw err;
+        }
+      }
+      stagedFiles.push(stagedPath);
+    }
+
     const zipPath = path.join(config.tmpDir, `cd-${nanoid(10)}.zip`);
-    const args = ["-j", "-q", zipPath, ...files];
+    const args = ["-j", "-q", zipPath, ...stagedFiles];
     const { code, stderr } = await run(ZIP.bin, args);
     if (code !== 0 || !fs.existsSync(zipPath)) {
       throw new Error(stderr || `zip exited with code ${code}`);
@@ -431,6 +501,11 @@ app.get("/api/zip", async (_req, res) => {
     } else {
       res.end();
     }
+  } finally {
+    await Promise.allSettled(stagedFiles.map((file) => safeUnlink(file)));
+    try {
+      await fsp.rm(stagingDir, { recursive: true, force: true });
+    } catch {}
   }
 });
 
