@@ -34,6 +34,7 @@ const state = {
 const THEME_STORAGE_KEY = "cd-maker-theme";
 
 const pendingAddRequests = new Map();
+const addProgressWatchers = new Map();
 let lastDisclaimerTrigger = null;
 
 const probeCache = new Map(); // key -> { fast, smart, pendingFast, pendingSmart, ts }
@@ -60,7 +61,17 @@ function readStoredTheme() {
 
 function applyTheme(mode, { persist = false } = {}) {
   const next = mode === "dark" ? "dark" : "light";
-  document.documentElement.dataset.theme = next;
+  const root = document.documentElement;
+  if (root) {
+    root.classList.add("no-theme-transition");
+    root.dataset.theme = next;
+    const clear = () => root.classList.remove("no-theme-transition");
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => requestAnimationFrame(clear));
+    } else {
+      setTimeout(clear, 0);
+    }
+  }
 
   if (dom.themeToggle) {
     dom.themeToggle.setAttribute(
@@ -386,8 +397,13 @@ class PlaylistRenderer {
     const actTd = document.createElement("td");
     actTd.className = "colAct";
     const status = document.createElement("span");
-    status.className = "subtle";
-    status.textContent = "Adding…";
+    status.className = "subtle optimisticProgress";
+    const pct =
+      typeof item?.progress === "number" && !Number.isNaN(item.progress)
+        ? Math.round(item.progress)
+        : null;
+    status.textContent = pct === null ? "…" : `${pct}%`;
+    status.setAttribute("aria-label", pct === null ? "Loading" : `${pct}% complete`);
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "action danger";
     cancelBtn.dataset.cancel = item.token;
@@ -578,14 +594,69 @@ async function refresh() {
   syncUI();
 }
 
+function stopAddProgressWatcher(token) {
+  if (!token) return;
+  const watcher = addProgressWatchers.get(token);
+  if (watcher) {
+    clearInterval(watcher.timer);
+    addProgressWatchers.delete(token);
+  }
+}
+
+function startAddProgressWatcher(token) {
+  if (!token) return;
+  stopAddProgressWatcher(token);
+
+  let inFlight = false;
+
+  const poll = async () => {
+    if (inFlight) return;
+    const stillTracked = state.optimisticAdds.some((entry) => entry.token === token);
+    if (!stillTracked) {
+      stopAddProgressWatcher(token);
+      return;
+    }
+    inFlight = true;
+    try {
+      const res = await fetch(`/api/add-progress/${encodeURIComponent(token)}`);
+      if (!res.ok) throw new Error("progress");
+      const data = await res.json();
+      if (typeof data?.progress === "number") {
+        updateOptimisticEntry(token, { progress: data.progress });
+      }
+      if (data?.done) {
+        stopAddProgressWatcher(token);
+      }
+    } catch (err) {
+      // ignore polling errors; we'll retry on next tick
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  poll();
+  const timer = setInterval(poll, 650);
+  addProgressWatchers.set(token, { timer });
+}
+
 function updateOptimisticEntry(token, patch) {
   const entry = state.optimisticAdds.find((o) => o.token === token);
   if (!entry) return;
-  Object.assign(entry, patch);
+  const nextPatch = { ...patch };
+  if (Object.prototype.hasOwnProperty.call(nextPatch, "progress")) {
+    const raw = Number(nextPatch.progress);
+    if (Number.isFinite(raw)) {
+      nextPatch.progress = Math.max(0, Math.min(100, raw));
+    } else {
+      delete nextPatch.progress;
+    }
+  }
+  Object.assign(entry, nextPatch);
   syncUI();
 }
 
 function removeOptimisticEntry(token, { silent = false } = {}) {
+  stopAddProgressWatcher(token);
   const idx = state.optimisticAdds.findIndex((o) => o.token === token);
   if (idx === -1) return;
   state.optimisticAdds.splice(idx, 1);
@@ -662,7 +733,7 @@ async function handleAddToCd() {
 
   hideThumb();
   const token = makeToken();
-  const optimistic = { token, title: "Loading…", duration: 0 };
+  const optimistic = { token, title: "Loading…", duration: 0, progress: 0 };
   state.optimisticAdds.push(optimistic);
   syncUI();
 
@@ -696,6 +767,7 @@ async function handleAddToCd() {
 
   const controller = new AbortController();
   pendingAddRequests.set(token, controller);
+  startAddProgressWatcher(token);
 
   try {
     const payload = bestFormat
@@ -921,8 +993,44 @@ async function handleZipDownload() {
 
 async function handleRemove(id) {
   if (!id) return;
-  await fetch(`/api/remove/${id}`, { method: "POST" });
-  await refresh();
+  const items = Array.isArray(state.server.items) ? state.server.items : [];
+  const idx = items.findIndex((item) => item?.id === id);
+  let removed = null;
+  if (idx !== -1) {
+    removed = items.splice(idx, 1)[0];
+    if (removed?.duration && typeof state.server.totalSeconds === "number") {
+      state.server.totalSeconds = Math.max(
+        0,
+        state.server.totalSeconds - Number(removed.duration || 0)
+      );
+    }
+    syncUI();
+  }
+
+  try {
+    const res = await fetch(`/api/remove/${id}`, { method: "POST" });
+    if (!res.ok) {
+      if (res.status === 404) {
+        await refresh();
+        return;
+      }
+      const txt = await res.text();
+      throw new Error(txt || `remove failed: ${res.status}`);
+    }
+    const body = await res.json();
+    if (body && typeof body.totalSeconds === "number") {
+      state.server.totalSeconds = body.totalSeconds;
+    }
+    if (body && typeof body.capSeconds === "number") {
+      state.server.capSeconds = body.capSeconds;
+    }
+    syncUI();
+  } catch (err) {
+    if (removed && idx !== -1) {
+      items.splice(Math.min(idx, items.length), 0, removed);
+    }
+    await refresh();
+  }
 }
 
 function handleCancel(token) {

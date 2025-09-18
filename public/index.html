@@ -7,20 +7,20 @@
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <button
-    id="themeToggle"
-    class="themeToggle"
-    type="button"
-    aria-label="Switch to dark mode"
-  >
-    <svg class="themeToggle__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path class="themeToggle__half themeToggle__half--light" d="M12 4a8 8 0 0 0 0 16V4z" />
-      <path class="themeToggle__half themeToggle__half--dark" d="M12 20a8 8 0 0 0 0-16v16z" />
-      <circle class="themeToggle__ring" cx="12" cy="12" r="8" fill="none" />
-    </svg>
-  </button>
-
   <main class="wrap">
+    <button
+      id="themeToggle"
+      class="themeToggle"
+      type="button"
+      aria-label="Switch to dark mode"
+    >
+      <svg class="themeToggle__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path class="themeToggle__half themeToggle__half--light" d="M12 4a8 8 0 0 0 0 16V4z" />
+        <path class="themeToggle__half themeToggle__half--dark" d="M12 20a8 8 0 0 0 0-16v16z" />
+        <circle class="themeToggle__ring" cx="12" cy="12" r="8" fill="none" />
+      </svg>
+    </button>
+
     <header class="stack header--bleed">
       <img
         src="/img/title.png"
@@ -83,19 +83,18 @@
 
     <footer class="foot subtle">
       <!--For personal use. Ensure you have the rights to process any content you convert.-->
-      Made by JPsson
+      <span class="foot__made">Made by JPsson</span>
+      <button
+        id="disclaimerLink"
+        class="disclaimerLink"
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded="false"
+      >
+        Disclaimer
+      </button>
     </footer>
   </main>
-
-  <button
-    id="disclaimerLink"
-    class="disclaimerLink"
-    type="button"
-    aria-haspopup="dialog"
-    aria-expanded="false"
-  >
-    Disclaimer
-  </button>
 
   <div
     id="disclaimerOverlay"

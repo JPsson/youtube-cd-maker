@@ -96,6 +96,10 @@ const playlistStore = new PlaylistStore(config.capSeconds);
 const canceledAddTokens = new Map();
 const CANCELED_TOKEN_TTL = 1000 * 60 * 15; // 15 minutes
 
+const addProgressMap = new Map();
+const ADD_PROGRESS_ACTIVE_TTL = 1000 * 60 * 5; // 5 minutes for active downloads
+const ADD_PROGRESS_DONE_TTL = 1000 * 10; // allow brief polling after completion
+
 function purgeCanceledTokens() {
   const now = Date.now();
   for (const [token, expiry] of canceledAddTokens) {
@@ -118,6 +122,48 @@ function isAddCanceled(token) {
 function clearCanceledToken(token) {
   if (!token) return;
   canceledAddTokens.delete(token);
+}
+
+function purgeAddProgress() {
+  const now = Date.now();
+  for (const [token, entry] of addProgressMap) {
+    if (!entry || typeof entry.expiresAt !== "number") {
+      addProgressMap.delete(token);
+      continue;
+    }
+    if (entry.expiresAt <= now) {
+      addProgressMap.delete(token);
+    }
+  }
+}
+
+function setAddProgress(token, value, { done = false } = {}) {
+  if (!token) return;
+  purgeAddProgress();
+  const raw = Number(value);
+  const clamped = Number.isFinite(raw) ? Math.max(0, Math.min(100, raw)) : 0;
+  const prev = addProgressMap.get(token);
+  const nextValue = !done && prev && typeof prev.value === "number"
+    ? Math.max(prev.value, clamped)
+    : clamped;
+  addProgressMap.set(token, {
+    value: nextValue,
+    done: Boolean(done),
+    expiresAt: Date.now() + (done ? ADD_PROGRESS_DONE_TTL : ADD_PROGRESS_ACTIVE_TTL),
+  });
+}
+
+function markAddProgressDone(token, value = 100) {
+  if (!token) return;
+  setAddProgress(token, value, { done: true });
+}
+
+function readAddProgress(token) {
+  if (!token) return null;
+  purgeAddProgress();
+  const entry = addProgressMap.get(token);
+  if (!entry) return null;
+  return { value: entry.value, done: entry.done };
 }
 
 async function safeUnlink(filePath) {
@@ -225,6 +271,25 @@ function formatZipEntryName(title, index, total, ext) {
   const cleanTitle = normalizeForZip(title) || `Track ${index}`;
   const cleanExt = ext && ext.startsWith(".") ? ext : ext ? `.${ext}` : "";
   return `${prefix} ${cleanTitle}${cleanExt}`;
+}
+
+function updateProgressFromYtDlp(token, chunk) {
+  if (!token || !chunk) return;
+  const text = chunk.toString();
+  const matches = text.match(/\[download\]\s+([\d.]+)%/g);
+  if (matches && matches.length) {
+    const last = matches[matches.length - 1];
+    const pctMatch = last.match(/([\d.]+)%/);
+    if (pctMatch) {
+      const pct = parseFloat(pctMatch[1]);
+      if (!Number.isNaN(pct)) {
+        setAddProgress(token, Math.min(99, pct));
+      }
+    }
+  }
+  if (/\[(?:ExtractAudio|Merger|ffmpeg)\]/i.test(text)) {
+    setAddProgress(token, 99);
+  }
 }
 
 // ---------- Metadata ----------
@@ -560,6 +625,18 @@ app.post("/api/cancel-add", (req, res) => {
   res.status(204).end();
 });
 
+app.get("/api/add-progress/:token", (req, res) => {
+  const token = req.params.token;
+  if (!token) {
+    return res.json({ progress: null, done: true });
+  }
+  const entry = readAddProgress(token);
+  if (!entry) {
+    return res.json({ progress: null, done: false });
+  }
+  res.json({ progress: entry.value, done: entry.done });
+});
+
 // Add to the CD list (stores MP3 file to /downloads and updates the playlist)
 app.post("/api/add", async (req, res) => {
   const { url, quality, format_id, client_token, used_client } = req.body || {};
@@ -570,8 +647,13 @@ app.post("/api/add", async (req, res) => {
     return res.status(400).json({ error: "Failed to read video metadata", detail: metaR.error, stderr: metaR.stderr });
   }
 
+  if (client_token) {
+    setAddProgress(client_token, 0);
+  }
+
   if (client_token && isAddCanceled(client_token)) {
     clearCanceledToken(client_token);
+    markAddProgressDone(client_token, 0);
     return res.json({ canceled: true, client_token });
   }
 
@@ -605,20 +687,53 @@ app.post("/api/add", async (req, res) => {
       path.join(config.downloadDir, "%(title)s-%(id)s.%(ext)s"),
       "--print",
       "after_move:filepath",
+      "--newline",
       url
     );
 
-    const { code, stdout, stderr } = await run(
-      YD.mode === "python" ? YD.bin : YD.bin,
-      (YD.mode === "python" ? ["-m", "yt_dlp"] : []).concat(args)
-    );
+    const proc = runYtDlp(args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    proc.stderr?.on("data", (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+      if (client_token) updateProgressFromYtDlp(client_token, text);
+    });
+
+    const code = await new Promise((resolve) => {
+      proc.on("error", (err) => {
+        stderr += `\n${err?.message || err}`;
+        resolve(-1);
+      });
+      proc.on("close", (exitCode) => {
+        resolve(exitCode);
+      });
+    });
+
+    if (client_token) {
+      if (code === 0) {
+        markAddProgressDone(client_token);
+      } else {
+        markAddProgressDone(client_token, 0);
+      }
+    }
+
     if (code !== 0) throw new Error(`yt-dlp exit ${code}: ${stderr}`);
 
     filePath = stdout.trim().split(/\r?\n/).filter(Boolean).pop();
+    if (!filePath) {
+      throw new Error("Failed to determine output file path");
+    }
     const stat = await fsp.stat(filePath);
 
     if (client_token && isAddCanceled(client_token)) {
       clearCanceledToken(client_token);
+      markAddProgressDone(client_token, 0);
       await safeUnlink(filePath);
       return res.json({ canceled: true, client_token });
     }
@@ -649,6 +764,9 @@ app.post("/api/add", async (req, res) => {
     });
   } catch (e) {
     clearCanceledToken(client_token);
+    if (client_token) {
+      markAddProgressDone(client_token, 0);
+    }
     if (filePath) await safeUnlink(filePath);
     console.error("[add] error:", e?.message || e);
     res.status(500).json({ error: "Convert failed", message: String(e?.message || e) });
