@@ -331,6 +331,12 @@ class PlaylistRenderer {
 
   createServerRow(item, index) {
     const tr = document.createElement("tr");
+    if (item?.id) {
+      tr.dataset.itemId = item.id;
+      tr.dataset.draggable = "true";
+    } else {
+      tr.dataset.draggable = "false";
+    }
 
     const idxTd = document.createElement("td");
     idxTd.className = "colIndex";
@@ -497,7 +503,15 @@ function setButtonsEnabled(on) {
 
 function updateActionButtons() {
   const hasItems = state.server.items.length > 0;
-  dom.downloadZipBtn.disabled = !hasItems;
+  const hasPendingAdds = state.optimisticAdds.length > 0;
+  dom.downloadZipBtn.disabled = !hasItems || hasPendingAdds;
+  if (dom.downloadZipBtn) {
+    if (hasPendingAdds) {
+      dom.downloadZipBtn.title = "Please wait for pending tracks to finish adding before downloading.";
+    } else {
+      dom.downloadZipBtn.removeAttribute("title");
+    }
+  }
   dom.clearBtn.disabled = !hasItems && state.optimisticAdds.length === 0;
 }
 
@@ -872,6 +886,7 @@ async function oneOffDownload(target) {
 
 async function handleZipDownload() {
   if (!state.server.items.length) return;
+  if (state.optimisticAdds.length) return;
 
   overlay.showZip({
     title: "Bundling your CD",
@@ -928,6 +943,160 @@ async function handleClear() {
   state.optimisticAdds.length = 0;
   await fetch("/api/clear", { method: "POST" });
   await refresh();
+}
+
+function extractServerOrderFromDom() {
+  if (!dom.listBody) return [];
+  return Array.from(dom.listBody.querySelectorAll("tr[data-item-id]"))
+    .map((row) => row.dataset.itemId)
+    .filter(Boolean);
+}
+
+function applyOrderToState(order) {
+  if (!Array.isArray(order)) return false;
+  const items = Array.isArray(state.server.items) ? state.server.items : [];
+  if (order.length !== items.length) return false;
+  const map = new Map(items.map((item) => [item.id, item]));
+  if (order.some((id) => !map.has(id))) return false;
+  state.server.items = order.map((id) => map.get(id));
+  return true;
+}
+
+function initReorderDrag() {
+  if (!dom.listBody) return;
+
+  let dragCtx = null;
+
+  const cleanup = (pointerId) => {
+    if (!dragCtx) return;
+    dragCtx.row.classList.remove("dragging");
+    if (typeof pointerId === "number" && dragCtx.row.releasePointerCapture) {
+      try {
+        dragCtx.row.releasePointerCapture(pointerId);
+      } catch {}
+    }
+    dragCtx = null;
+  };
+
+  dom.listBody.addEventListener("pointerdown", (event) => {
+    if (event.isPrimary === false) return;
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    const row = event.target.closest("tr[data-item-id]");
+    if (!row) return;
+    if (!row.dataset.itemId) return;
+    if (event.target.closest("button, a, input, textarea, select")) return;
+    const serverCount = Array.isArray(state.server.items) ? state.server.items.length : 0;
+    if (serverCount <= 1) return;
+
+    dragCtx = {
+      row,
+      pointerId: event.pointerId,
+      startOrder: extractServerOrderFromDom(),
+    };
+    row.classList.add("dragging");
+    if (row.setPointerCapture) {
+      try {
+        row.setPointerCapture(event.pointerId);
+      } catch {}
+    }
+    event.preventDefault();
+  });
+
+  dom.listBody.addEventListener("pointermove", (event) => {
+    if (!dragCtx || event.pointerId !== dragCtx.pointerId) return;
+    dragCtx.moved = true;
+    event.preventDefault();
+
+    const rows = Array.from(dom.listBody.querySelectorAll("tr[data-item-id]"));
+    if (!rows.length) return;
+
+    const draggingIndex = rows.indexOf(dragCtx.row);
+    if (draggingIndex === -1) return;
+
+    const { clientX, clientY } = event;
+    let targetRow = document.elementFromPoint(clientX, clientY)?.closest("tr[data-item-id]");
+
+    if (!targetRow) {
+      const bodyRect = dom.listBody.getBoundingClientRect();
+      if (clientY < bodyRect.top) {
+        const first = rows[0];
+        if (first && first !== dragCtx.row) {
+          dom.listBody.insertBefore(dragCtx.row, first);
+        }
+      } else if (clientY > bodyRect.bottom) {
+        const last = rows[rows.length - 1];
+        if (last && last !== dragCtx.row) {
+          dom.listBody.insertBefore(dragCtx.row, last.nextSibling);
+        }
+      }
+      return;
+    }
+
+    if (targetRow === dragCtx.row) return;
+
+    const targetIndex = rows.indexOf(targetRow);
+    if (targetIndex === -1) return;
+
+    if (targetIndex < draggingIndex) {
+      dom.listBody.insertBefore(dragCtx.row, targetRow);
+    } else {
+      dom.listBody.insertBefore(dragCtx.row, targetRow.nextSibling);
+    }
+  });
+
+  const finishDrag = (canceled = false) => {
+    if (!dragCtx) return;
+    const pointerId = dragCtx.pointerId;
+    const startOrder = dragCtx.startOrder;
+    const moved = dragCtx.moved;
+    cleanup(pointerId);
+
+    if (!moved || canceled) {
+      if (canceled) {
+        syncUI();
+      }
+      return;
+    }
+
+    const newOrder = extractServerOrderFromDom();
+    if (newOrder.length !== startOrder.length) {
+      refresh();
+      return;
+    }
+    const changed = newOrder.some((id, idx) => id !== startOrder[idx]);
+    if (!changed) {
+      return;
+    }
+
+    if (!applyOrderToState(newOrder)) {
+      refresh();
+      return;
+    }
+
+    syncUI();
+
+    fetch("/api/reorder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ order: newOrder }),
+    }).then((r) => {
+      if (!r.ok) {
+        throw new Error("Reorder failed");
+      }
+    }).catch(() => {
+      refresh();
+    });
+  };
+
+  dom.listBody.addEventListener("pointerup", (event) => {
+    if (!dragCtx || event.pointerId !== dragCtx.pointerId) return;
+    finishDrag(false);
+  });
+
+  dom.listBody.addEventListener("pointercancel", (event) => {
+    if (!dragCtx || event.pointerId !== dragCtx.pointerId) return;
+    finishDrag(true);
+  });
 }
 
 function onUrlChanged() {
@@ -1011,6 +1180,8 @@ dom.listBody.addEventListener("click", (event) => {
     handleCancel(cancel.dataset.cancel);
   }
 });
+
+initReorderDrag();
 
 dom.url.addEventListener("input", debounce(onUrlChanged, 120));
 dom.url.addEventListener("paste", () => setTimeout(onUrlChanged, 0));

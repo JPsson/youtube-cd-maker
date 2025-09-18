@@ -450,6 +450,19 @@ code {
   transition: background-color 160ms ease;
 }
 
+.list tbody tr[data-draggable="true"] {
+  cursor: grab;
+}
+
+.list tbody tr.dragging {
+  cursor: grabbing;
+  opacity: 0.6;
+}
+
+.list tbody tr.dragging .action {
+  pointer-events: none;
+}
+
 .list tbody tr:hover {
   background: var(--panel-hover);
 }
