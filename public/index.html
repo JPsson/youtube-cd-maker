@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8" />
   <title>CD Maker · YouTube → MP3/WAV</title>
@@ -7,6 +7,19 @@
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
+  <button
+    id="themeToggle"
+    class="themeToggle"
+    type="button"
+    aria-label="Switch to dark mode"
+  >
+    <svg class="themeToggle__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path class="themeToggle__half themeToggle__half--light" d="M12 4a8 8 0 0 0 0 16V4z" />
+      <path class="themeToggle__half themeToggle__half--dark" d="M12 20a8 8 0 0 0 0-16v16z" />
+      <circle class="themeToggle__ring" cx="12" cy="12" r="8" fill="none" />
+    </svg>
+  </button>
+
   <main class="wrap">
     <header class="stack header--bleed">
       <img
@@ -32,7 +45,7 @@
 
       <!-- Centered buttons -->
       <div class="row actions">
-        <button id="btnAdd" class="btn ghost alt" disabled>Add To CD</button>
+        <button id="btnAdd" class="btn ghost" disabled>Add To CD</button>
         <span class="or">or</span>
         <button id="btnMp3" class="btn ghost" disabled>MP3</button>
         <button id="btnWav" class="btn ghost" disabled>WAV</button>
@@ -48,17 +61,19 @@
         <div class="gauge__label"><span id="gaugeText">0:00 / 80:00</span></div>
       </div>
 
-      <table class="list" id="list">
-        <thead>
-          <tr>
-            <th class="colIndex">#</th>
-            <th class="colTitle">Title</th>
-            <th class="colDur">Duration</th>
-            <th class="colAct"></th>
-          </tr>
-        </thead>
-        <tbody id="listBody"></tbody>
-      </table>
+      <div class="tableScroll">
+        <table class="list" id="list">
+          <thead>
+            <tr>
+              <th class="colIndex">#</th>
+              <th class="colTitle">Title</th>
+              <th class="colDur">Duration</th>
+              <th class="colAct"></th>
+            </tr>
+          </thead>
+          <tbody id="listBody"></tbody>
+        </table>
+      </div>
 
       <div class="listActions">
         <button id="clear" class="btn ghost">Clear list</button>
