@@ -338,6 +338,16 @@ async function transcodeToWav4416(inputPath) {
   return out;
 }
 
+function encodeContentDisposition(name) {
+  const raw = (name ?? "download").toString();
+  const fallback = raw
+    .replace(/["\\\r\n;%]+/g, "_")
+    .replace(/[^\x20-\x7E]+/g, "_")
+    .trim() || "download";
+  const encoded = encodeURIComponent(raw);
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
 function streamAndUnlink(res, filePath, downloadName, mimeOverride) {
   const ext = path.extname(filePath).toLowerCase();
   let mime = mimeOverride;
@@ -349,7 +359,7 @@ function streamAndUnlink(res, filePath, downloadName, mimeOverride) {
   }
   const rs = fs.createReadStream(filePath);
   res.setHeader("Content-Type", mime);
-  res.setHeader("Content-Disposition", `attachment; filename="${downloadName}"`);
+  res.setHeader("Content-Disposition", encodeContentDisposition(downloadName));
   rs.pipe(res);
   rs.on("close", async () => {
     try { await fsp.unlink(filePath); } catch {}
