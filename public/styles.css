@@ -182,18 +182,34 @@ h1 {
 }
 
 .row.actions {
+  display: grid;
   justify-content: center;
+  justify-items: center;
+  align-items: center;
   gap: 14px;
   margin-top: 16px;
-  flex-wrap: wrap;
+  grid-template-columns: repeat(4, max-content);
+  grid-template-areas: "add or mp3 wav";
 }
 
-.row.actions .btn {
-  flex: 1 1 80;
+.row.actions #btnAdd {
+  grid-area: add;
+}
+
+.row.actions #btnMp3 {
+  grid-area: mp3;
+}
+
+.row.actions #btnWav {
+  grid-area: wav;
 }
 
 .row.actions .or {
-  flex: 0 0 auto;
+  grid-area: or;
+}
+
+.row.actions .btn {
+  min-width: 110px;
 }
 
 .or {
@@ -781,13 +797,26 @@ header + .panel {
   .list {
     min-width: 420px;
   }
+}
 
-  .listActions {
-    align-items: stretch;
+@media (max-width: 720px) {
+  .row.actions {
+    grid-template-columns: repeat(2, max-content);
+    grid-template-areas:
+      "add or"
+      "mp3 wav";
+    row-gap: 12px;
   }
+}
 
-  .listActions .btn {
-    width: 100%;
+@media (max-width: 520px) {
+  .row.actions {
+    grid-template-columns: max-content;
+    grid-template-areas:
+      "add"
+      "or"
+      "mp3"
+      "wav";
   }
 }
 
@@ -806,22 +835,6 @@ header + .panel {
   .disclaimerLink {
     left: 12px;
     bottom: 12px;
-  }
-
-  .row.actions {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
-  }
-
-  .row.actions .btn {
-    flex: 1 1 auto;
-    width: 100%;
-  }
-
-  .row.actions .or {
-    order: -1;
-    padding: 6px 0;
   }
 
   .thumbWrap {
