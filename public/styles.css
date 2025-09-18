@@ -1,12 +1,12 @@
 /* ========== base theme ========== */
 :root {
-  --bg: #0f0f10;
-  --panel: #161618;
-  --text: #e7e7ea;
-  --muted: #9a9aa3;
-  --accent: #ffffff;
-  --border: #2a2a2e;
-  --danger: #ff6363;
+  --bg: #f6f6f8;
+  --panel: #ffffff;
+  --text: #111216;
+  --muted: #767680;
+  --accent: #111111;
+  --border: #e0e1e6;
+  --danger: #d5484a;
 }
 
 /* ========== resets ========== */
@@ -65,8 +65,9 @@ h1 {
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
-  padding: 16px;
+  padding: 20px;
   border-radius: 12px;
+  box-shadow: 0 18px 32px rgba(17, 18, 22, 0.06);
   margin-top: 16px;
 }
 
@@ -96,19 +97,20 @@ h1 {
 /* ========== form controls & buttons ========== */
 .input, .select {
   flex: 1;
-  background: transparent;
+  background: #fbfbfc;
   color: var(--text);
   border: 1px solid var(--border);
-  padding: 10px 12px;
+  padding: 12px 14px;
   border-radius: 10px;
   outline: none;
-  transition: border-color 120ms ease, box-shadow 120ms ease;
+  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
 }
 
 .input:focus-visible,
 .select:focus-visible {
-  border-color: #44444a;
-  box-shadow: 0 0 0 3px rgb(255 255 255 / 6%);
+  border-color: var(--accent);
+  background: #fff;
+  box-shadow: 0 0 0 4px rgba(17, 17, 17, 0.08);
 }
 
 .select { flex: 0 0 220px; }
@@ -126,34 +128,47 @@ h1 {
 
 /* Buttons */
 .btn {
-  background: var(--accent);
-  color: #000;
+  background: #ffffff;
+  color: var(--text);
   border: 1px solid var(--border);
-  padding: 10px 16px;
+  padding: 12px 20px;
   border-radius: 10px;
   cursor: pointer;
-  font-weight: 700;
-  transition: transform 80ms ease, opacity 120ms ease, background-color 120ms ease;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease, opacity 120ms ease;
   min-width: 110px;
   text-align: center;
 }
 
-.btn:hover:not(:disabled) { transform: translateY(-1px); }
-.btn:active:not(:disabled) { transform: translateY(0); }
-.btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.btn:hover:not(:disabled),
+.btn:focus-visible:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.btn:disabled {
+  background: #f0f0f5;
+  color: #b2b2bd;
+  border-color: #e4e4ec;
+  cursor: not-allowed;
+}
 
 .btn.ghost {
   background: transparent;
   color: var(--text);
 }
 
-/* Slightly filled variant for "Add To CD" so it reads as a different action */
 .btn.ghost.alt {
-  background: #17171b;          /* barely filled */
-  border-color: #33333a;
+  background: #f0f0f5;
+  border-color: #d4d4dd;
 }
-.btn.ghost.alt:hover { background: #1b1b20; }
-.btn.ghost.alt:disabled { background: transparent; }
+.btn.ghost.alt:disabled {
+  background: #f5f5f8;
+  color: #b2b2bd;
+  border-color: #e4e4ec;
+}
 
 .disclaimerLink {
   position: fixed;
@@ -193,7 +208,7 @@ h1 {
 
 code {
   font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  background: #1d1d22;
+  background: #f3f3f7;
   color: var(--text);
   padding: 2px 6px;
   border-radius: 6px;
@@ -204,7 +219,7 @@ code {
 .gauge { display: grid; gap: 8px; margin-bottom: 12px; }
 .gauge__bar {
   height: 14px;
-  background: #1d1d22;
+  background: #f0f0f5;
   border-radius: 999px;
   border: 1px solid var(--border);
   overflow: hidden;
@@ -236,6 +251,14 @@ code {
   vertical-align: middle;
 }
 
+.list tbody tr {
+  transition: background-color 160ms ease;
+}
+
+.list tbody tr:hover {
+  background: #f6f6fa;
+}
+
 .colIndex { width: 54px; text-align: right; padding-right: 4px; }
 .colTitle { width: 100%; }
 .colDur   { width: 90px; white-space: nowrap; text-align: left; }
@@ -246,19 +269,27 @@ code {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  background: transparent;
+  background: #ffffff;
   color: var(--text);
   border: 1px solid var(--border);
-  padding: 6px 10px;
+  padding: 6px 12px;
   border-radius: 8px;
   cursor: pointer;
-  transition: background-color 120ms ease, transform 80ms ease;
+  transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease;
 }
-.action:hover { background: #1b1b20; transform: translateY(-1px); }
-.action:active { transform: translateY(0); }
+.action:hover,
+.action:focus-visible {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.action:active {
+  background: #0a0a0a;
+  border-color: #0a0a0a;
+}
 
 .action.danger {
-  border-color: #3a2020;
+  border-color: rgba(213, 72, 74, 0.4);
   color: var(--danger);
 }
 
@@ -276,9 +307,10 @@ code {
   width: 100%;
   aspect-ratio: 16 / 9;
   object-fit: cover;
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid var(--border);
-  background: #1d1d22;
+  background: #f0f0f5;
+  box-shadow: 0 14px 28px rgba(17, 18, 22, 0.08);
 }
 
 /* skeleton shimmer */
@@ -293,22 +325,24 @@ code {
 .overlay {
   position: fixed;
   inset: 0;
-  background: var(--bg);
+  background: rgba(246, 246, 248, 0.96);
   display: grid;
   place-items: center;
   z-index: 9999;
+  backdrop-filter: blur(12px);
 }
 .overlay[hidden] { display: none; }
 
 .overlayCard {
-  background: var(--panel);
+  background: #ffffff;
   border: 1px solid var(--border);
-  padding: 28px;
-  border-radius: 12px;
+  padding: 32px;
+  border-radius: 14px;
   display: grid;
   gap: 18px;
   width: min(420px, calc(100vw - 48px));
   justify-items: center;
+  box-shadow: 0 30px 60px rgba(17, 18, 22, 0.12);
 }
 
 .overlayVisual {
@@ -321,11 +355,12 @@ code {
   position: relative;
   width: 180px;
   height: 180px;
-  border-radius: 16px;
+  border-radius: 18px;
   border: 1px solid var(--border);
   overflow: hidden;
-  background: #1d1d22;
+  background: #f2f2f7;
   display: none;
+  box-shadow: 0 18px 36px rgba(17, 18, 22, 0.12);
 }
 
 .overlayThumbFrame.show { display: block; }
@@ -365,11 +400,11 @@ code {
   width: clamp(200px, 42vw, 260px);
   aspect-ratio: 1 / 1;
   border-radius: 50%;
-  background: radial-gradient(circle at 30% 30%, #2f2f38 0%, #1f1f25 45%, #16161b 70%, #101015 100%);
-  border: 1px solid #3c3c46;
+  background: radial-gradient(circle at 32% 28%, #ffffff 0%, #f3f3f8 45%, #e8e8ef 70%, #dedee6 100%);
+  border: 1px solid #d2d2dc;
   display: none;
   overflow: hidden;
-  box-shadow: inset 0 0 0 6px rgba(255,255,255,0.04), inset 0 0 0 18px rgba(0,0,0,0.3);
+  box-shadow: inset 0 0 0 6px rgba(255, 255, 255, 0.8), inset 0 0 0 18px rgba(17, 18, 22, 0.08);
 }
 
 .overlayDisc::after {
@@ -377,8 +412,8 @@ code {
   position: absolute;
   inset: 35%;
   border-radius: 50%;
-  border: 1px solid rgba(255,255,255,0.08);
-  background: radial-gradient(circle, rgba(0,0,0,0.12) 0%, rgba(0,0,0,0.6) 100%);
+  border: 1px solid rgba(209, 209, 222, 0.8);
+  background: radial-gradient(circle, rgba(255,255,255,0.2) 0%, rgba(223,223,232,0.65) 100%);
   pointer-events: none;
 }
 
@@ -390,9 +425,9 @@ code {
   left: 50%;
   transform-origin: center;
   border-radius: 12px;
-  box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+  box-shadow: 0 12px 28px rgba(17, 18, 22, 0.2);
   object-fit: cover;
-  border: 1px solid rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.7);
 }
 
 .overlayDisc img:nth-child(odd) { filter: saturate(1.15); }
@@ -403,22 +438,23 @@ code {
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgba(15, 15, 16, 0.92);
+  background: rgba(17, 18, 22, 0.55);
   z-index: 9998;
   padding: 24px;
+  backdrop-filter: blur(4px);
 }
 
 .infoOverlay[hidden] { display: none; }
 
 .infoOverlay__card {
-  background: var(--panel);
+  background: #ffffff;
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: clamp(20px, 4vw, 32px);
+  border-radius: 16px;
+  padding: clamp(24px, 4vw, 36px);
   width: min(520px, calc(100vw - 48px));
   display: grid;
   gap: 16px;
-  box-shadow: 0 22px 48px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 30px 60px rgba(17, 18, 22, 0.12);
 }
 
 .infoOverlay__card h2 {
@@ -477,7 +513,7 @@ code {
   margin-top: 8px;
   white-space: pre-wrap;
   font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  background: #1d1d22;
+  background: #f3f3f8;
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 8px;
