@@ -42,11 +42,23 @@ body {
 
 h1 {
   margin: 0;
-  text-align: center; 
+  text-align: center;
   font-weight: 700;
   letter-spacing: 0.3px;
   font-size: 28px;
 }
+
+/* Title image: fill the same inner width as the rest of the page, no outline */
+.brandMark {
+  display: block;
+  width: 65%;      /* fill the .wrap content width (matches panels) */
+  height: auto;
+  margin: 0 auto 8px;
+  border: 0;        /* remove outline */
+  box-shadow: none; /* remove outline-like shadow */
+  border-radius: 0; /* square edges; set to 12px if you want softly rounded */
+}
+
 
 .subtle { color: var(--muted); }
 
@@ -142,6 +154,26 @@ h1 {
 }
 .btn.ghost.alt:hover { background: #1b1b20; }
 .btn.ghost.alt:disabled { background: transparent; }
+
+.disclaimerLink {
+  position: fixed;
+  left: 18px;
+  bottom: 18px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  z-index: 9500;
+}
+
+.disclaimerLink:hover,
+.disclaimerLink:focus-visible {
+  color: var(--text);
+}
 
 /* Small "or" between Add and format buttons */
 .or {
@@ -366,6 +398,51 @@ code {
 .overlayDisc img:nth-child(odd) { filter: saturate(1.15); }
 .overlayDisc img:nth-child(even) { filter: contrast(1.1); }
 
+.infoOverlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 15, 16, 0.92);
+  z-index: 9998;
+  padding: 24px;
+}
+
+.infoOverlay[hidden] { display: none; }
+
+.infoOverlay__card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: clamp(20px, 4vw, 32px);
+  width: min(520px, calc(100vw - 48px));
+  display: grid;
+  gap: 16px;
+  box-shadow: 0 22px 48px rgba(0, 0, 0, 0.45);
+}
+
+.infoOverlay__card h2 {
+  margin: 0;
+  font-size: clamp(20px, 2.6vw, 24px);
+  letter-spacing: 0.02em;
+}
+
+.infoOverlay__card p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.infoOverlay__card p + p {
+  margin-top: 6px;
+}
+
+.infoOverlay__card .btn {
+  justify-self: end;
+  min-width: 120px;
+}
+
 .listActions {
   margin-top: 16px;
   display: flex;
@@ -380,7 +457,14 @@ code {
 @media (min-width: 1280px) {
   .wrap { max-width: 1200px; }           /* gentle bump at big widths */
   #url { width: min(760px, calc(100% - 32px)); }
-  .thumbWrap { width: clamp(300px, 40vw, 420px); }
+  .thumbWrap { width: clamp(300px, 40vw, 340px); }
+}
+
+@media (max-width: 640px) {
+  .disclaimerLink {
+    left: 12px;
+    bottom: 12px;
+  }
 }
 
 /* prevent accidental text selection on quick clicks */
@@ -401,3 +485,10 @@ code {
   max-height: 220px;
   overflow: auto;
 }
+
+/* 1) No gap under the title image */
+.brandMark { margin-bottom: 0; }
+
+/* 2) No gap above the first panel right below the header */
+header + .panel { margin-top: 0; }
+/* (If you prefer to target your specific first panel: #panelTop { margin-top: 0; }) */

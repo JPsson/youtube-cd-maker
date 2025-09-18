@@ -78,6 +78,33 @@ class PlaylistStore {
 
 const playlistStore = new PlaylistStore(config.capSeconds);
 
+const canceledAddTokens = new Map();
+const CANCELED_TOKEN_TTL = 1000 * 60 * 15; // 15 minutes
+
+function purgeCanceledTokens() {
+  const now = Date.now();
+  for (const [token, expiry] of canceledAddTokens) {
+    if (expiry <= now) canceledAddTokens.delete(token);
+  }
+}
+
+function markAddCanceled(token) {
+  if (!token) return;
+  purgeCanceledTokens();
+  canceledAddTokens.set(token, Date.now() + CANCELED_TOKEN_TTL);
+}
+
+function isAddCanceled(token) {
+  if (!token) return false;
+  purgeCanceledTokens();
+  return canceledAddTokens.has(token);
+}
+
+function clearCanceledToken(token) {
+  if (!token) return;
+  canceledAddTokens.delete(token);
+}
+
 async function safeUnlink(filePath) {
   if (!filePath) return;
   try {
@@ -439,6 +466,15 @@ app.post("/api/probe", async (req, res) => {
   }
 });
 
+app.post("/api/cancel-add", (req, res) => {
+  const { token } = req.body || {};
+  if (!token || typeof token !== "string") {
+    return res.status(400).json({ error: "Missing token" });
+  }
+  markAddCanceled(token);
+  res.status(204).end();
+});
+
 // Add to the CD list (stores MP3 file to /downloads and updates the playlist)
 app.post("/api/add", async (req, res) => {
   const { url, quality, format_id, client_token, used_client } = req.body || {};
@@ -449,6 +485,13 @@ app.post("/api/add", async (req, res) => {
     return res.status(400).json({ error: "Failed to read video metadata", detail: metaR.error, stderr: metaR.stderr });
   }
 
+  if (client_token && isAddCanceled(client_token)) {
+    clearCanceledToken(client_token);
+    return res.json({ canceled: true, client_token });
+  }
+
+  let filePath = null;
+
   try {
     const q = (quality || "").toLowerCase();
     const audioQuality = (q === "320" || q === "320k") ? "320K" : "0"; // default V0
@@ -457,41 +500,55 @@ app.post("/api/add", async (req, res) => {
     const clientArg = used_client || metaR.usedClient || "";
     if (clientArg && clientArg.trim()) args.push("--extractor-args", clientArg);
     if (COOKIES_PATH) args.push("--cookies", COOKIES_PATH);
-    if (YTDLP_EXTRA)  args.push(...YTDLP_EXTRA.split(" ").filter(Boolean));
+    if (YTDLP_EXTRA) args.push(...YTDLP_EXTRA.split(" ").filter(Boolean));
 
-    const looksLikePath = FF.bin && (FF.bin.startsWith("/") || FF.bin.includes("\\") || /^[A-Za-z]:\\/.test(FF.bin));
+    const looksLikePath =
+      FF.bin && (FF.bin.startsWith("/") || FF.bin.includes("\\") || /^[A-Za-z]:\\/.test(FF.bin));
     if (looksLikePath) args.push("--ffmpeg-location", FF.bin);
 
     if (format_id) args.push("-f", String(format_id));
 
     args.push(
-      "-x", "--audio-format", "mp3",
-      "--audio-quality", audioQuality,
+      "-x",
+      "--audio-format",
+      "mp3",
+      "--audio-quality",
+      audioQuality,
       "--no-playlist",
       "--restrict-filenames",
-      "-o", path.join(config.downloadDir, "%(title)s-%(id)s.%(ext)s"),
-      "--print", "after_move:filepath",
+      "-o",
+      path.join(config.downloadDir, "%(title)s-%(id)s.%(ext)s"),
+      "--print",
+      "after_move:filepath",
       url
     );
 
     const { code, stdout, stderr } = await run(
       YD.mode === "python" ? YD.bin : YD.bin,
-      (YD.mode === "python" ? ["-m","yt_dlp"] : []).concat(args)
+      (YD.mode === "python" ? ["-m", "yt_dlp"] : []).concat(args)
     );
     if (code !== 0) throw new Error(`yt-dlp exit ${code}: ${stderr}`);
 
-    const file = stdout.trim().split(/\r?\n/).filter(Boolean).pop();
-    const stat = await fsp.stat(file);
+    filePath = stdout.trim().split(/\r?\n/).filter(Boolean).pop();
+    const stat = await fsp.stat(filePath);
+
+    if (client_token && isAddCanceled(client_token)) {
+      clearCanceledToken(client_token);
+      await safeUnlink(filePath);
+      return res.json({ canceled: true, client_token });
+    }
+
     const item = {
       id: nanoid(8),
-      title: metaR.meta.title || path.basename(file),
+      title: metaR.meta.title || path.basename(filePath),
       duration: Number(metaR.meta.duration) || 0,
-      filepath: file,
+      filepath: filePath,
       sizeBytes: stat.size,
       videoId: metaR.meta.id || null,
       thumbnail: pickThumbnail(metaR.meta) || null,
     };
     playlistStore.add(item);
+    clearCanceledToken(client_token);
     res.json({
       item: {
         id: item.id,
@@ -503,9 +560,11 @@ app.post("/api/add", async (req, res) => {
       },
       totalSeconds: playlistStore.totalSeconds,
       capSeconds: playlistStore.capSeconds,
-      client_token
+      client_token,
     });
   } catch (e) {
+    clearCanceledToken(client_token);
+    if (filePath) await safeUnlink(filePath);
     console.error("[add] error:", e?.message || e);
     res.status(500).json({ error: "Convert failed", message: String(e?.message || e) });
   }
