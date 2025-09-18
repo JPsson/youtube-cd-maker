@@ -209,7 +209,18 @@ h1 {
 }
 
 .row.actions .btn {
-  min-width: 110px;
+  min-width: 0;
+  padding-inline: 16px;
+}
+
+.row.actions #btnAdd {
+  padding-inline: 18px;
+}
+
+.row.actions #btnMp3,
+.row.actions #btnWav {
+  padding-inline: 12px;
+  min-width: 84px;
 }
 
 .or {
@@ -285,6 +296,13 @@ h1 {
   color: var(--disabled-text);
   border-color: var(--disabled-border);
   cursor: not-allowed;
+  opacity: 1;
+}
+
+.btn.ghost:disabled {
+  background: var(--disabled-bg);
+  color: var(--disabled-text);
+  border-color: var(--disabled-border);
 }
 
 .btn.ghost {
@@ -301,6 +319,13 @@ h1 {
   background: var(--panel-subtle);
   color: var(--disabled-text);
   border-color: var(--disabled-border);
+}
+
+.action:disabled {
+  background: var(--disabled-bg);
+  color: var(--disabled-text);
+  border-color: var(--disabled-border);
+  cursor: not-allowed;
 }
 
 .disclaimerLink {
@@ -427,7 +452,7 @@ code {
 .list {
   width: 100%;
   border-collapse: collapse;
-  min-width: 520px;
+  min-width: min(520px, 100%);
 }
 
 .list thead th {
@@ -808,11 +833,11 @@ header + .panel {
 
 @media (max-width: 768px) {
   .list {
-    min-width: 420px;
+    min-width: min(420px, 100%);
   }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 520px) {
   .row.actions {
     grid-template-columns: repeat(2, max-content);
     grid-template-areas:
@@ -822,7 +847,7 @@ header + .panel {
   }
 }
 
-@media (max-width: 520px) {
+@media (max-width: 340px) {
   .row.actions {
     grid-template-columns: max-content;
     grid-template-areas:
@@ -852,6 +877,43 @@ header + .panel {
 
   .thumbWrap {
     width: min(100%, 420px);
+  }
+}
+
+@media (max-width: 560px) {
+  .list thead th,
+  .list tbody td {
+    padding: 8px 6px;
+  }
+
+  .colIndex {
+    width: 46px;
+  }
+
+  .colDur {
+    width: 76px;
+  }
+
+  .colAct {
+    width: 150px;
+  }
+}
+
+@media (max-width: 440px) {
+  .panel {
+    padding: max(16px, var(--panel-pad) - 4px);
+  }
+
+  .row.actions {
+    gap: 12px;
+  }
+
+  .thumbWrap {
+    width: min(100%, 360px);
+  }
+
+  .listActions {
+    width: 100%;
   }
 }
 
