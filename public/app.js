@@ -23,6 +23,7 @@ const dom = {
   disclaimerLink: document.getElementById("disclaimerLink"),
   disclaimerOverlay: document.getElementById("disclaimerOverlay"),
   disclaimerClose: document.getElementById("disclaimerClose"),
+  themeToggle: document.getElementById("themeToggle"),
 };
 
 const state = {
@@ -30,10 +31,82 @@ const state = {
   optimisticAdds: [],
 };
 
+const THEME_STORAGE_KEY = "cd-maker-theme";
+
 const pendingAddRequests = new Map();
 let lastDisclaimerTrigger = null;
 
 const probeCache = new Map(); // key -> { fast, smart, pendingFast, pendingSmart, ts }
+
+const prefersDarkScheme =
+  typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia("(prefers-color-scheme: dark)")
+    : null;
+let userPreferredTheme = null;
+
+function readStoredTheme() {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === "dark" || stored === "light") {
+      userPreferredTheme = stored;
+      return stored;
+    }
+  } catch (err) {
+    // ignore storage errors (e.g. private mode)
+  }
+  userPreferredTheme = null;
+  return prefersDarkScheme?.matches ? "dark" : "light";
+}
+
+function applyTheme(mode, { persist = false } = {}) {
+  const next = mode === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = next;
+
+  if (dom.themeToggle) {
+    dom.themeToggle.setAttribute(
+      "aria-label",
+      next === "dark" ? "Switch to light mode" : "Switch to dark mode"
+    );
+    dom.themeToggle.setAttribute("data-theme", next);
+    dom.themeToggle.setAttribute(
+      "title",
+      next === "dark" ? "Switch to light mode" : "Switch to dark mode"
+    );
+  }
+
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, next);
+    } catch (err) {
+      // ignore storage errors
+    }
+    userPreferredTheme = next;
+  }
+}
+
+function initThemeToggle() {
+  if (!dom.themeToggle) return;
+
+  const initial = readStoredTheme();
+  applyTheme(initial);
+
+  dom.themeToggle.addEventListener("click", () => {
+    const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+    const next = current === "dark" ? "light" : "dark";
+    applyTheme(next, { persist: true });
+  });
+
+  const handleSystemChange = (event) => {
+    if (userPreferredTheme) return;
+    applyTheme(event.matches ? "dark" : "light");
+  };
+
+  if (prefersDarkScheme?.addEventListener) {
+    prefersDarkScheme.addEventListener("change", handleSystemChange);
+  } else if (prefersDarkScheme?.addListener) {
+    prefersDarkScheme.addListener(handleSystemChange);
+  }
+}
 
 class DotsAnimator {
   constructor(target, interval = 400) {
@@ -893,6 +966,8 @@ function setDisclaimerVisibility(show) {
     lastDisclaimerTrigger = null;
   }
 }
+
+initThemeToggle();
 
 dom.btnAdd.addEventListener("click", handleAddToCd);
 dom.btnMp3.addEventListener("click", () => oneOffDownload("mp3"));
