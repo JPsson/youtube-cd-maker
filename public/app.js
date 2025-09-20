@@ -34,7 +34,7 @@ const state = {
 const THEME_STORAGE_KEY = "cd-maker-theme";
 
 const pendingAddRequests = new Map();
-const addProgressWatchers = new Map();
+const optimisticLoadingIndicators = new Map();
 let lastDisclaimerTrigger = null;
 
 const probeCache = new Map(); // key -> { fast, smart, pendingFast, pendingSmart, ts }
@@ -378,6 +378,9 @@ class PlaylistRenderer {
 
   createOptimisticRow(item, index) {
     const tr = document.createElement("tr");
+    if (item?.token) {
+      tr.dataset.optimisticToken = item.token;
+    }
 
     const idxTd = document.createElement("td");
     idxTd.className = "colIndex";
@@ -398,22 +401,11 @@ class PlaylistRenderer {
     actTd.className = "colAct colAct--optimistic";
     const status = document.createElement("span");
     status.className = "subtle optimisticProgress";
-    const rawProgress =
-      typeof item?.progress === "number" && !Number.isNaN(item.progress)
-        ? item.progress
-        : null;
-    const rawSynthetic =
-      typeof item?.syntheticProgress === "number" && !Number.isNaN(item.syntheticProgress)
-        ? item.syntheticProgress
-        : null;
-    const pctValue =
-      rawProgress === null && rawSynthetic === null
-        ? null
-        : Math.max(rawProgress ?? 0, rawSynthetic ?? 0);
-    const pct =
-      pctValue === null ? null : Math.max(0, Math.min(100, Math.round(pctValue)));
-    status.textContent = pct === null ? "…" : `${pct}%`;
-    status.setAttribute("aria-label", pct === null ? "Loading" : `${pct}% complete`);
+    if (item?.token) {
+      status.dataset.optimisticToken = item.token;
+    }
+    status.textContent = "Loading";
+    status.setAttribute("aria-label", "Loading");
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "action danger";
     cancelBtn.dataset.cancel = item.token;
@@ -594,6 +586,7 @@ function setPickedNoteError(msg) {
 
 function syncUI() {
   playlistRenderer.render(state.server, state.optimisticAdds);
+  refreshOptimisticLoadingIndicators();
   updateActionButtons();
 }
 
@@ -604,144 +597,81 @@ async function refresh() {
   syncUI();
 }
 
-function stopFallbackProgress(token) {
+function stopOptimisticLoading(token) {
   if (!token) return;
-  const watcher = addProgressWatchers.get(token);
-  if (!watcher) return;
-  if (watcher.fallbackStarter) {
-    clearTimeout(watcher.fallbackStarter);
-    watcher.fallbackStarter = null;
-  }
-  if (watcher.fallbackTimer) {
-    clearInterval(watcher.fallbackTimer);
-    watcher.fallbackTimer = null;
-  }
+  const indicator = optimisticLoadingIndicators.get(token);
+  if (!indicator) return;
+  if (indicator.timer) clearInterval(indicator.timer);
+  optimisticLoadingIndicators.delete(token);
 }
 
-function stopAddProgressWatcher(token) {
-  if (!token) return;
-  const watcher = addProgressWatchers.get(token);
-  if (!watcher) return;
-  if (watcher.timer) {
-    clearInterval(watcher.timer);
-  }
-  stopFallbackProgress(token);
-  addProgressWatchers.delete(token);
-}
-
-function startAddProgressWatcher(token) {
-  if (!token) return;
-  stopAddProgressWatcher(token);
-
-  let inFlight = false;
-
-  const watcher = { timer: null, fallbackTimer: null, fallbackStarter: null };
-  addProgressWatchers.set(token, watcher);
-
-  const poll = async () => {
-    if (inFlight) return;
-    const stillTracked = state.optimisticAdds.some((entry) => entry.token === token);
-    if (!stillTracked) {
-      stopAddProgressWatcher(token);
-      return;
-    }
-    inFlight = true;
-    try {
-      const res = await fetch(`/api/add-progress/${encodeURIComponent(token)}`);
-      if (!res.ok) throw new Error("progress");
-      const data = await res.json();
-      if (typeof data?.progress === "number") {
-        updateOptimisticEntry(token, { progress: data.progress });
+function ensureOptimisticLoadingIndicator(token, el) {
+  if (!token || !el) return;
+  let indicator = optimisticLoadingIndicators.get(token);
+  const frames = ["Loading.", "Loading..", "Loading..."];
+  if (!indicator) {
+    let frameIndex = 0;
+    const applyFrame = () => {
+      const text = frames[frameIndex];
+      indicator.text = text;
+      if (indicator.el) {
+        indicator.el.textContent = text;
+        indicator.el.setAttribute("aria-label", "Loading");
       }
-      if (data?.done) {
-        if (typeof data.progress !== "number") {
-          updateOptimisticEntry(token, { progress: 100 });
-        }
-        stopAddProgressWatcher(token);
-      }
-    } catch (err) {
-      // ignore polling errors; we'll retry on next tick
-    } finally {
-      inFlight = false;
-    }
-  };
-
-  poll();
-  watcher.timer = setInterval(poll, 650);
-
-  const fallbackMax = 88;
-  const fallbackDelay = 1200;
-  const fallbackStepMs = 850;
-
-  const scheduleFallback = () => {
-    const tick = () => {
-      const entry = state.optimisticAdds.find((o) => o.token === token);
-      if (!entry) {
-        stopAddProgressWatcher(token);
-        return;
-      }
-      if (typeof entry.progress === "number" && entry.progress > 0) {
-        stopFallbackProgress(token);
-        return;
-      }
-      const current =
-        typeof entry.syntheticProgress === "number" && !Number.isNaN(entry.syntheticProgress)
-          ? entry.syntheticProgress
-          : 0;
-      if (current >= fallbackMax) {
-        stopFallbackProgress(token);
-        return;
-      }
-      const increment = Math.max(0.5, Math.min(2.5, (fallbackMax - current) * 0.045));
-      const next = Math.min(fallbackMax, current + increment);
-      if (next > current + 0.05) {
-        updateOptimisticEntry(token, { syntheticProgress: next });
-      }
+      frameIndex = (frameIndex + 1) % frames.length;
     };
 
-    watcher.fallbackTimer = setInterval(tick, fallbackStepMs);
-    tick();
-  };
+    indicator = {
+      el,
+      text: frames[0],
+      timer: null,
+    };
 
-  watcher.fallbackStarter = setTimeout(scheduleFallback, fallbackDelay);
+    indicator.timer = setInterval(applyFrame, 450);
+    optimisticLoadingIndicators.set(token, indicator);
+    applyFrame();
+    return;
+  }
+
+  indicator.el = el;
+  if (indicator.text) {
+    el.textContent = indicator.text;
+  } else {
+    el.textContent = frames[0];
+    indicator.text = frames[0];
+  }
+  el.setAttribute("aria-label", "Loading");
+}
+
+function refreshOptimisticLoadingIndicators() {
+  const tokens = new Set(state.optimisticAdds.map((entry) => entry.token).filter(Boolean));
+  const stale = [];
+  optimisticLoadingIndicators.forEach((_, token) => {
+    if (!tokens.has(token)) stale.push(token);
+  });
+  stale.forEach((token) => stopOptimisticLoading(token));
+
+  if (!dom.listBody) return;
+
+  state.optimisticAdds.forEach((entry) => {
+    if (!entry?.token) return;
+    const row = dom.listBody.querySelector(`tr[data-optimistic-token="${entry.token}"]`);
+    if (!row) return;
+    const status = row.querySelector(".optimisticProgress");
+    if (!status) return;
+    ensureOptimisticLoadingIndicator(entry.token, status);
+  });
 }
 
 function updateOptimisticEntry(token, patch) {
   const entry = state.optimisticAdds.find((o) => o.token === token);
   if (!entry) return;
-  const nextPatch = { ...patch };
-  let removeSynthetic = false;
-  if (Object.prototype.hasOwnProperty.call(nextPatch, "progress")) {
-    const raw = Number(nextPatch.progress);
-    if (Number.isFinite(raw)) {
-      nextPatch.progress = Math.max(0, Math.min(100, raw));
-      if (nextPatch.progress > 0) {
-        removeSynthetic = true;
-        stopFallbackProgress(token);
-      }
-      if (nextPatch.progress >= 100) {
-        stopAddProgressWatcher(token);
-      }
-    } else {
-      delete nextPatch.progress;
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(nextPatch, "syntheticProgress")) {
-    const raw = Number(nextPatch.syntheticProgress);
-    if (Number.isFinite(raw)) {
-      nextPatch.syntheticProgress = Math.max(0, Math.min(100, raw));
-    } else {
-      delete nextPatch.syntheticProgress;
-      removeSynthetic = true;
-    }
-  }
-  Object.assign(entry, nextPatch);
-  if (removeSynthetic) delete entry.syntheticProgress;
+  Object.assign(entry, patch);
   syncUI();
 }
 
 function removeOptimisticEntry(token, { silent = false } = {}) {
-  stopAddProgressWatcher(token);
+  stopOptimisticLoading(token);
   const idx = state.optimisticAdds.findIndex((o) => o.token === token);
   if (idx === -1) return;
   state.optimisticAdds.splice(idx, 1);
@@ -818,7 +748,7 @@ async function handleAddToCd() {
 
   hideThumb();
   const token = makeToken();
-  const optimistic = { token, title: "Loading…", duration: 0, progress: 0, syntheticProgress: 0 };
+  const optimistic = { token, title: "Loading…", duration: 0 };
   state.optimisticAdds.push(optimistic);
   syncUI();
 
@@ -852,8 +782,6 @@ async function handleAddToCd() {
 
   const controller = new AbortController();
   pendingAddRequests.set(token, controller);
-  startAddProgressWatcher(token);
-
   try {
     const payload = bestFormat
       ? {
@@ -1134,6 +1062,7 @@ function handleCancel(token) {
 async function handleClear() {
   if (!confirm("Clear the whole list and delete files?")) return;
   state.optimisticAdds.length = 0;
+  optimisticLoadingIndicators.forEach((_, token) => stopOptimisticLoading(token));
   await fetch("/api/clear", { method: "POST" });
   await refresh();
 }

@@ -867,7 +867,15 @@ header + .panel {
 
 @media (max-width: 640px) {
   body {
-    grid-template-rows: auto;
+    display: block;
+    min-height: 100vh;
+    margin: 0;
+  }
+
+  .wrap {
+    grid-row: auto;
+    margin: 12px auto 28px;
+    padding: 0 clamp(14px, 6vw, 28px);
   }
 
   .themeToggle {
@@ -881,18 +889,20 @@ header + .panel {
   }
 
   .foot {
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 8px;
   }
 
   .foot__made {
-    width: 100%;
-    text-align: center;
+    width: auto;
+    text-align: left;
   }
 
   .foot .disclaimerLink {
-    margin-left: 0;
+    margin-left: auto;
+    align-self: flex-end;
   }
 }
 
@@ -968,18 +978,20 @@ header + .panel {
 .foot {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
   margin-top: 24px;
+  width: 100%;
 }
 
 .foot__made {
-  flex: 1;
-  text-align: center;
+  flex: none;
+  text-align: left;
 }
 
 .foot .disclaimerLink {
   margin-left: auto;
-  align-self: flex-end;
+  align-self: center;
 }
 
 @media (min-width: 768px) {
@@ -992,19 +1004,11 @@ header + .panel {
   }
 
   .foot {
-    position: fixed;
-    left: clamp(16px, 4vw, 32px);
-    bottom: clamp(16px, 4vh, 32px);
-    margin-top: 0;
     flex-direction: column;
     align-items: flex-start;
+    align-self: flex-start;
+    width: auto;
     gap: 6px;
-    z-index: 10;
-  }
-
-  .foot__made {
-    flex: none;
-    text-align: left;
   }
 
   .foot .disclaimerLink {
