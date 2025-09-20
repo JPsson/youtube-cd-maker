@@ -200,6 +200,7 @@ h1 {
   align-items: center;
   gap: 14px;
   margin-top: 16px;
+  grid-template-columns: repeat(4, max-content);
   grid-auto-columns: max-content;
   grid-template-areas: "add or mp3 wav";
 }
@@ -341,6 +342,9 @@ h1 {
 }
 
 .disclaimerLink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
   padding: 0;
   border: none;
   background: none;
@@ -351,11 +355,8 @@ h1 {
   cursor: pointer;
   letter-spacing: 0.02em;
   transition: color 160ms ease;
-  position: fixed;
-  bottom: clamp(16px, 5vh, 36px);
-  right: clamp(16px, 6vw, 32px);
-  margin: 0;
-  z-index: 30;
+  margin-left: auto;
+  align-self: flex-end;
 }
 
 .disclaimerLink:hover,
@@ -521,8 +522,9 @@ code {
 }
 
 .colAct {
-  width: 200px;
-  text-align: left;
+  width: 140px;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .colAct--optimistic {
@@ -530,7 +532,7 @@ code {
   flex-direction: column;
   align-items: flex-end;
   justify-content: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .colAct--optimistic .optimisticProgress {
@@ -932,8 +934,8 @@ header + .panel {
 
   .foot {
     flex-wrap: wrap;
-    justify-content: flex-start;
-    align-items: flex-start;
+    justify-content: space-between;
+    align-items: flex-end;
     gap: 8px;
   }
 
@@ -945,15 +947,22 @@ header + .panel {
 
 @media (max-width: 640px) {
   .row.actions {
+    grid-template-columns: repeat(3, max-content);
+    grid-template-areas: "add mp3 wav";
+  }
+
+  .row.actions .or {
+    display: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .row.actions {
     grid-template-columns: repeat(2, max-content);
     grid-template-areas:
       "add add"
       "mp3 wav";
     row-gap: 12px;
-  }
-
-  .row.actions .or {
-    display: none;
   }
 }
 
@@ -982,7 +991,7 @@ header + .panel {
   }
 
   .colAct {
-    width: 150px;
+    width: 132px;
   }
 }
 
@@ -1014,23 +1023,25 @@ header + .panel {
 
 .foot {
   display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 12px;
-  margin-top: 24px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
   width: 100%;
 }
 
 .foot__made {
   flex: none;
   text-align: left;
+  margin-right: auto;
 }
 
 @media (min-width: 768px) {
   .themeToggle {
     position: fixed;
-    top: clamp(16px, 4vh, 28px);
-    left: clamp(16px, 4vw, 32px);
+    top: clamp(12px, 3vh, 24px);
+    left: clamp(12px, 3vw, 24px);
     z-index: 20;
     margin: 0;
   }
@@ -1044,9 +1055,12 @@ header + .panel {
   }
 
   .disclaimerLink {
-    left: clamp(16px, 4vw, 32px);
+    position: fixed;
+    left: clamp(12px, 3vw, 24px);
     right: auto;
-    bottom: clamp(16px, 4vh, 32px);
+    bottom: clamp(12px, 4vh, 28px);
+    margin: 0;
+    z-index: 30;
   }
 }
 
