@@ -523,26 +523,28 @@ code {
 
 .colAct {
   width: 1%;
-  text-align: right;
+  min-width: 116px;
   white-space: nowrap;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
 }
 
 .colAct--optimistic {
-  display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-end;
   justify-content: center;
-  text-align: center;
-  gap: 6px;
+  gap: 8px;
+  text-align: right;
 }
 
 .colAct--optimistic .optimisticProgress {
   flex: none;
-  margin-inline: auto;
+  margin-inline: 0;
 }
 
 .colAct--optimistic .action {
-  align-self: center;
+  align-self: flex-end;
 }
 
 .optimisticProgress {
