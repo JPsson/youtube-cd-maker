@@ -198,7 +198,7 @@ h1 {
   justify-content: center;
   justify-items: center;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   margin-top: 16px;
   grid-template-columns: repeat(4, max-content);
   grid-auto-columns: max-content;
@@ -223,17 +223,17 @@ h1 {
 
 .row.actions .btn {
   min-width: 0;
-  padding-inline: 16px;
+  padding-inline: 12px;
 }
 
 .row.actions #btnAdd {
-  padding-inline: 18px;
+  padding-inline: 16px;
 }
 
 .row.actions #btnMp3,
 .row.actions #btnWav {
-  padding-inline: 12px;
-  min-width: 84px;
+  padding-inline: 10px;
+  min-width: 72px;
 }
 
 .or {
@@ -522,7 +522,7 @@ code {
 }
 
 .colAct {
-  width: 140px;
+  width: 1%;
   text-align: right;
   white-space: nowrap;
 }
@@ -530,13 +530,19 @@ code {
 .colAct--optimistic {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
+  align-items: center;
   justify-content: center;
+  text-align: center;
   gap: 6px;
 }
 
 .colAct--optimistic .optimisticProgress {
   flex: none;
+  margin-inline: auto;
+}
+
+.colAct--optimistic .action {
+  align-self: center;
 }
 
 .optimisticProgress {
@@ -988,10 +994,6 @@ header + .panel {
 
   .colDur {
     width: 76px;
-  }
-
-  .colAct {
-    width: 132px;
   }
 }
 
