@@ -696,7 +696,9 @@ app.post("/api/add", async (req, res) => {
     let stderr = "";
 
     proc.stdout?.on("data", (chunk) => {
-      stdout += chunk.toString();
+      const text = chunk.toString();
+      stdout += text;
+      if (client_token) updateProgressFromYtDlp(client_token, text);
     });
 
     proc.stderr?.on("data", (chunk) => {

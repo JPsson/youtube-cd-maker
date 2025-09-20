@@ -345,7 +345,8 @@ h1 {
   background: none;
   color: var(--link-muted);
   font: inherit;
-  text-decoration: underline;
+  text-decoration: none;
+  text-transform: lowercase;
   cursor: pointer;
   letter-spacing: 0.02em;
   transition: color 160ms ease;
@@ -518,9 +519,26 @@ code {
   text-align: left;
 }
 
+.colAct--optimistic {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.colAct--optimistic .optimisticProgress {
+  flex: 1 1 64px;
+  max-width: 140px;
+}
+
 .optimisticProgress {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  text-align: center;
 }
 
 .action {
@@ -962,5 +980,36 @@ header + .panel {
 .foot .disclaimerLink {
   margin-left: auto;
   align-self: flex-end;
+}
+
+@media (min-width: 768px) {
+  .themeToggle {
+    position: fixed;
+    top: clamp(16px, 4vh, 28px);
+    left: clamp(16px, 4vw, 32px);
+    z-index: 20;
+    margin: 0;
+  }
+
+  .foot {
+    position: fixed;
+    left: clamp(16px, 4vw, 32px);
+    bottom: clamp(16px, 4vh, 32px);
+    margin-top: 0;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    z-index: 10;
+  }
+
+  .foot__made {
+    flex: none;
+    text-align: left;
+  }
+
+  .foot .disclaimerLink {
+    margin-left: 0;
+    align-self: flex-start;
+  }
 }
 

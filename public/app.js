@@ -395,20 +395,30 @@ class PlaylistRenderer {
     tr.appendChild(durTd);
 
     const actTd = document.createElement("td");
-    actTd.className = "colAct";
+    actTd.className = "colAct colAct--optimistic";
     const status = document.createElement("span");
     status.className = "subtle optimisticProgress";
-    const pct =
+    const rawProgress =
       typeof item?.progress === "number" && !Number.isNaN(item.progress)
-        ? Math.round(item.progress)
+        ? item.progress
         : null;
+    const rawSynthetic =
+      typeof item?.syntheticProgress === "number" && !Number.isNaN(item.syntheticProgress)
+        ? item.syntheticProgress
+        : null;
+    const pctValue =
+      rawProgress === null && rawSynthetic === null
+        ? null
+        : Math.max(rawProgress ?? 0, rawSynthetic ?? 0);
+    const pct =
+      pctValue === null ? null : Math.max(0, Math.min(100, Math.round(pctValue)));
     status.textContent = pct === null ? "…" : `${pct}%`;
     status.setAttribute("aria-label", pct === null ? "Loading" : `${pct}% complete`);
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "action danger";
     cancelBtn.dataset.cancel = item.token;
     cancelBtn.textContent = "Cancel";
-    actTd.append(status, document.createTextNode(" "), cancelBtn);
+    actTd.append(status, cancelBtn);
     tr.appendChild(actTd);
 
     return tr;
@@ -594,13 +604,29 @@ async function refresh() {
   syncUI();
 }
 
+function stopFallbackProgress(token) {
+  if (!token) return;
+  const watcher = addProgressWatchers.get(token);
+  if (!watcher) return;
+  if (watcher.fallbackStarter) {
+    clearTimeout(watcher.fallbackStarter);
+    watcher.fallbackStarter = null;
+  }
+  if (watcher.fallbackTimer) {
+    clearInterval(watcher.fallbackTimer);
+    watcher.fallbackTimer = null;
+  }
+}
+
 function stopAddProgressWatcher(token) {
   if (!token) return;
   const watcher = addProgressWatchers.get(token);
-  if (watcher) {
+  if (!watcher) return;
+  if (watcher.timer) {
     clearInterval(watcher.timer);
-    addProgressWatchers.delete(token);
   }
+  stopFallbackProgress(token);
+  addProgressWatchers.delete(token);
 }
 
 function startAddProgressWatcher(token) {
@@ -608,6 +634,9 @@ function startAddProgressWatcher(token) {
   stopAddProgressWatcher(token);
 
   let inFlight = false;
+
+  const watcher = { timer: null, fallbackTimer: null, fallbackStarter: null };
+  addProgressWatchers.set(token, watcher);
 
   const poll = async () => {
     if (inFlight) return;
@@ -625,6 +654,9 @@ function startAddProgressWatcher(token) {
         updateOptimisticEntry(token, { progress: data.progress });
       }
       if (data?.done) {
+        if (typeof data.progress !== "number") {
+          updateOptimisticEntry(token, { progress: 100 });
+        }
         stopAddProgressWatcher(token);
       }
     } catch (err) {
@@ -635,23 +667,76 @@ function startAddProgressWatcher(token) {
   };
 
   poll();
-  const timer = setInterval(poll, 650);
-  addProgressWatchers.set(token, { timer });
+  watcher.timer = setInterval(poll, 650);
+
+  const fallbackMax = 88;
+  const fallbackDelay = 1200;
+  const fallbackStepMs = 850;
+
+  const scheduleFallback = () => {
+    const tick = () => {
+      const entry = state.optimisticAdds.find((o) => o.token === token);
+      if (!entry) {
+        stopAddProgressWatcher(token);
+        return;
+      }
+      if (typeof entry.progress === "number" && entry.progress > 0) {
+        stopFallbackProgress(token);
+        return;
+      }
+      const current =
+        typeof entry.syntheticProgress === "number" && !Number.isNaN(entry.syntheticProgress)
+          ? entry.syntheticProgress
+          : 0;
+      if (current >= fallbackMax) {
+        stopFallbackProgress(token);
+        return;
+      }
+      const increment = Math.max(0.5, Math.min(2.5, (fallbackMax - current) * 0.045));
+      const next = Math.min(fallbackMax, current + increment);
+      if (next > current + 0.05) {
+        updateOptimisticEntry(token, { syntheticProgress: next });
+      }
+    };
+
+    watcher.fallbackTimer = setInterval(tick, fallbackStepMs);
+    tick();
+  };
+
+  watcher.fallbackStarter = setTimeout(scheduleFallback, fallbackDelay);
 }
 
 function updateOptimisticEntry(token, patch) {
   const entry = state.optimisticAdds.find((o) => o.token === token);
   if (!entry) return;
   const nextPatch = { ...patch };
+  let removeSynthetic = false;
   if (Object.prototype.hasOwnProperty.call(nextPatch, "progress")) {
     const raw = Number(nextPatch.progress);
     if (Number.isFinite(raw)) {
       nextPatch.progress = Math.max(0, Math.min(100, raw));
+      if (nextPatch.progress > 0) {
+        removeSynthetic = true;
+        stopFallbackProgress(token);
+      }
+      if (nextPatch.progress >= 100) {
+        stopAddProgressWatcher(token);
+      }
     } else {
       delete nextPatch.progress;
     }
   }
+  if (Object.prototype.hasOwnProperty.call(nextPatch, "syntheticProgress")) {
+    const raw = Number(nextPatch.syntheticProgress);
+    if (Number.isFinite(raw)) {
+      nextPatch.syntheticProgress = Math.max(0, Math.min(100, raw));
+    } else {
+      delete nextPatch.syntheticProgress;
+      removeSynthetic = true;
+    }
+  }
   Object.assign(entry, nextPatch);
+  if (removeSynthetic) delete entry.syntheticProgress;
   syncUI();
 }
 
@@ -733,7 +818,7 @@ async function handleAddToCd() {
 
   hideThumb();
   const token = makeToken();
-  const optimistic = { token, title: "Loading…", duration: 0, progress: 0 };
+  const optimistic = { token, title: "Loading…", duration: 0, progress: 0, syntheticProgress: 0 };
   state.optimisticAdds.push(optimistic);
   syncUI();
 
