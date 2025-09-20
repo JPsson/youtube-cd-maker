@@ -400,12 +400,21 @@ class PlaylistRenderer {
     const actTd = document.createElement("td");
     actTd.className = "colAct colAct--optimistic";
     const status = document.createElement("span");
-    status.className = "subtle optimisticProgress";
+    status.className = "optimisticProgress";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    status.setAttribute("aria-busy", "true");
     if (item?.token) {
       status.dataset.optimisticToken = item.token;
     }
-    status.textContent = "Loading";
     status.setAttribute("aria-label", "Loading");
+    const spinner = document.createElement("span");
+    spinner.className = "optimisticSpinner";
+    spinner.setAttribute("aria-hidden", "true");
+    const srText = document.createElement("span");
+    srText.className = "srOnly";
+    srText.textContent = "Loading";
+    status.append(spinner, srText);
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "action danger";
     cancelBtn.dataset.cancel = item.token;
@@ -608,38 +617,24 @@ function stopOptimisticLoading(token) {
 function ensureOptimisticLoadingIndicator(token, el) {
   if (!token || !el) return;
   let indicator = optimisticLoadingIndicators.get(token);
-  const frames = ["Loading.", "Loading..", "Loading..."];
   if (!indicator) {
-    let frameIndex = 0;
-    const applyFrame = () => {
-      const text = frames[frameIndex];
-      indicator.text = text;
-      if (indicator.el) {
-        indicator.el.textContent = text;
-        indicator.el.setAttribute("aria-label", "Loading");
-      }
-      frameIndex = (frameIndex + 1) % frames.length;
-    };
-
-    indicator = {
-      el,
-      text: frames[0],
-      timer: null,
-    };
-
-    indicator.timer = setInterval(applyFrame, 450);
+    indicator = {};
     optimisticLoadingIndicators.set(token, indicator);
-    applyFrame();
-    return;
   }
-
   indicator.el = el;
-  if (indicator.text) {
-    el.textContent = indicator.text;
-  } else {
-    el.textContent = frames[0];
-    indicator.text = frames[0];
+  if (!el.querySelector(".optimisticSpinner")) {
+    el.textContent = "";
+    const spinner = document.createElement("span");
+    spinner.className = "optimisticSpinner";
+    spinner.setAttribute("aria-hidden", "true");
+    const srText = document.createElement("span");
+    srText.className = "srOnly";
+    srText.textContent = "Loading";
+    el.append(spinner, srText);
   }
+  el.setAttribute("role", "status");
+  el.setAttribute("aria-live", "polite");
+  el.setAttribute("aria-busy", "true");
   el.setAttribute("aria-label", "Loading");
 }
 

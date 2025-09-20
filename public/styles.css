@@ -139,6 +139,7 @@ body {
   width: min(660px, 100%);
   margin: clamp(16px, 4vw, 32px) auto;
   padding: 0 clamp(16px, 4vw, 32px);
+  padding-bottom: clamp(72px, 10vh, 128px);
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -350,6 +351,11 @@ h1 {
   cursor: pointer;
   letter-spacing: 0.02em;
   transition: color 160ms ease;
+  position: fixed;
+  bottom: clamp(16px, 5vh, 36px);
+  right: clamp(16px, 6vw, 32px);
+  margin: 0;
+  z-index: 30;
 }
 
 .disclaimerLink:hover,
@@ -521,24 +527,59 @@ code {
 
 .colAct--optimistic {
   display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 8px;
 }
 
 .colAct--optimistic .optimisticProgress {
-  flex: 1 1 64px;
-  max-width: 140px;
+  flex: none;
 }
 
 .optimisticProgress {
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.04em;
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 48px;
-  text-align: center;
+  min-width: 28px;
+  min-height: 28px;
+  color: var(--muted);
+}
+
+.optimisticSpinner {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-left-color: transparent;
+  display: inline-block;
+  animation: optimisticSpinnerTurn 1.6s linear infinite;
+  opacity: 0.85;
+}
+
+@keyframes optimisticSpinnerTurn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .optimisticSpinner {
+    animation-duration: 2.8s;
+  }
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .action {
@@ -876,6 +917,7 @@ header + .panel {
     grid-row: auto;
     margin: 12px auto 28px;
     padding: 0 clamp(14px, 6vw, 28px);
+    padding-bottom: clamp(104px, 18vh, 176px);
   }
 
   .themeToggle {
@@ -890,7 +932,7 @@ header + .panel {
 
   .foot {
     flex-wrap: wrap;
-    justify-content: space-between;
+    justify-content: flex-start;
     align-items: flex-start;
     gap: 8px;
   }
@@ -898,11 +940,6 @@ header + .panel {
   .foot__made {
     width: auto;
     text-align: left;
-  }
-
-  .foot .disclaimerLink {
-    margin-left: auto;
-    align-self: flex-end;
   }
 }
 
@@ -978,7 +1015,7 @@ header + .panel {
 .foot {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
   margin-top: 24px;
   width: 100%;
@@ -987,11 +1024,6 @@ header + .panel {
 .foot__made {
   flex: none;
   text-align: left;
-}
-
-.foot .disclaimerLink {
-  margin-left: auto;
-  align-self: center;
 }
 
 @media (min-width: 768px) {
@@ -1011,9 +1043,10 @@ header + .panel {
     gap: 6px;
   }
 
-  .foot .disclaimerLink {
-    margin-left: 0;
-    align-self: flex-start;
+  .disclaimerLink {
+    left: clamp(16px, 4vw, 32px);
+    right: auto;
+    bottom: clamp(16px, 4vh, 32px);
   }
 }
 
