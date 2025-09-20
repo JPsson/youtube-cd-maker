@@ -34,6 +34,7 @@ const state = {
 const THEME_STORAGE_KEY = "cd-maker-theme";
 
 const pendingAddRequests = new Map();
+const optimisticLoadingIndicators = new Map();
 let lastDisclaimerTrigger = null;
 
 const probeCache = new Map(); // key -> { fast, smart, pendingFast, pendingSmart, ts }
@@ -60,7 +61,17 @@ function readStoredTheme() {
 
 function applyTheme(mode, { persist = false } = {}) {
   const next = mode === "dark" ? "dark" : "light";
-  document.documentElement.dataset.theme = next;
+  const root = document.documentElement;
+  if (root) {
+    root.classList.add("no-theme-transition");
+    root.dataset.theme = next;
+    const clear = () => root.classList.remove("no-theme-transition");
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => requestAnimationFrame(clear));
+    } else {
+      setTimeout(clear, 0);
+    }
+  }
 
   if (dom.themeToggle) {
     dom.themeToggle.setAttribute(
@@ -367,6 +378,9 @@ class PlaylistRenderer {
 
   createOptimisticRow(item, index) {
     const tr = document.createElement("tr");
+    if (item?.token) {
+      tr.dataset.optimisticToken = item.token;
+    }
 
     const idxTd = document.createElement("td");
     idxTd.className = "colIndex";
@@ -384,15 +398,28 @@ class PlaylistRenderer {
     tr.appendChild(durTd);
 
     const actTd = document.createElement("td");
-    actTd.className = "colAct";
+    actTd.className = "colAct colAct--optimistic";
     const status = document.createElement("span");
-    status.className = "subtle";
-    status.textContent = "Adding…";
+    status.className = "optimisticProgress";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    status.setAttribute("aria-busy", "true");
+    if (item?.token) {
+      status.dataset.optimisticToken = item.token;
+    }
+    status.setAttribute("aria-label", "Loading");
+    const spinner = document.createElement("span");
+    spinner.className = "optimisticSpinner";
+    spinner.setAttribute("aria-hidden", "true");
+    const srText = document.createElement("span");
+    srText.className = "srOnly";
+    srText.textContent = "Loading";
+    status.append(spinner, srText);
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "action danger";
     cancelBtn.dataset.cancel = item.token;
     cancelBtn.textContent = "Cancel";
-    actTd.append(status, document.createTextNode(" "), cancelBtn);
+    actTd.append(status, cancelBtn);
     tr.appendChild(actTd);
 
     return tr;
@@ -568,6 +595,7 @@ function setPickedNoteError(msg) {
 
 function syncUI() {
   playlistRenderer.render(state.server, state.optimisticAdds);
+  refreshOptimisticLoadingIndicators();
   updateActionButtons();
 }
 
@@ -578,6 +606,58 @@ async function refresh() {
   syncUI();
 }
 
+function stopOptimisticLoading(token) {
+  if (!token) return;
+  const indicator = optimisticLoadingIndicators.get(token);
+  if (!indicator) return;
+  if (indicator.timer) clearInterval(indicator.timer);
+  optimisticLoadingIndicators.delete(token);
+}
+
+function ensureOptimisticLoadingIndicator(token, el) {
+  if (!token || !el) return;
+  let indicator = optimisticLoadingIndicators.get(token);
+  if (!indicator) {
+    indicator = {};
+    optimisticLoadingIndicators.set(token, indicator);
+  }
+  indicator.el = el;
+  if (!el.querySelector(".optimisticSpinner")) {
+    el.textContent = "";
+    const spinner = document.createElement("span");
+    spinner.className = "optimisticSpinner";
+    spinner.setAttribute("aria-hidden", "true");
+    const srText = document.createElement("span");
+    srText.className = "srOnly";
+    srText.textContent = "Loading";
+    el.append(spinner, srText);
+  }
+  el.setAttribute("role", "status");
+  el.setAttribute("aria-live", "polite");
+  el.setAttribute("aria-busy", "true");
+  el.setAttribute("aria-label", "Loading");
+}
+
+function refreshOptimisticLoadingIndicators() {
+  const tokens = new Set(state.optimisticAdds.map((entry) => entry.token).filter(Boolean));
+  const stale = [];
+  optimisticLoadingIndicators.forEach((_, token) => {
+    if (!tokens.has(token)) stale.push(token);
+  });
+  stale.forEach((token) => stopOptimisticLoading(token));
+
+  if (!dom.listBody) return;
+
+  state.optimisticAdds.forEach((entry) => {
+    if (!entry?.token) return;
+    const row = dom.listBody.querySelector(`tr[data-optimistic-token="${entry.token}"]`);
+    if (!row) return;
+    const status = row.querySelector(".optimisticProgress");
+    if (!status) return;
+    ensureOptimisticLoadingIndicator(entry.token, status);
+  });
+}
+
 function updateOptimisticEntry(token, patch) {
   const entry = state.optimisticAdds.find((o) => o.token === token);
   if (!entry) return;
@@ -586,6 +666,7 @@ function updateOptimisticEntry(token, patch) {
 }
 
 function removeOptimisticEntry(token, { silent = false } = {}) {
+  stopOptimisticLoading(token);
   const idx = state.optimisticAdds.findIndex((o) => o.token === token);
   if (idx === -1) return;
   state.optimisticAdds.splice(idx, 1);
@@ -696,7 +777,6 @@ async function handleAddToCd() {
 
   const controller = new AbortController();
   pendingAddRequests.set(token, controller);
-
   try {
     const payload = bestFormat
       ? {
@@ -921,8 +1001,44 @@ async function handleZipDownload() {
 
 async function handleRemove(id) {
   if (!id) return;
-  await fetch(`/api/remove/${id}`, { method: "POST" });
-  await refresh();
+  const items = Array.isArray(state.server.items) ? state.server.items : [];
+  const idx = items.findIndex((item) => item?.id === id);
+  let removed = null;
+  if (idx !== -1) {
+    removed = items.splice(idx, 1)[0];
+    if (removed?.duration && typeof state.server.totalSeconds === "number") {
+      state.server.totalSeconds = Math.max(
+        0,
+        state.server.totalSeconds - Number(removed.duration || 0)
+      );
+    }
+    syncUI();
+  }
+
+  try {
+    const res = await fetch(`/api/remove/${id}`, { method: "POST" });
+    if (!res.ok) {
+      if (res.status === 404) {
+        await refresh();
+        return;
+      }
+      const txt = await res.text();
+      throw new Error(txt || `remove failed: ${res.status}`);
+    }
+    const body = await res.json();
+    if (body && typeof body.totalSeconds === "number") {
+      state.server.totalSeconds = body.totalSeconds;
+    }
+    if (body && typeof body.capSeconds === "number") {
+      state.server.capSeconds = body.capSeconds;
+    }
+    syncUI();
+  } catch (err) {
+    if (removed && idx !== -1) {
+      items.splice(Math.min(idx, items.length), 0, removed);
+    }
+    await refresh();
+  }
 }
 
 function handleCancel(token) {
@@ -941,6 +1057,7 @@ function handleCancel(token) {
 async function handleClear() {
   if (!confirm("Clear the whole list and delete files?")) return;
   state.optimisticAdds.length = 0;
+  optimisticLoadingIndicators.forEach((_, token) => stopOptimisticLoading(token));
   await fetch("/api/clear", { method: "POST" });
   await refresh();
 }

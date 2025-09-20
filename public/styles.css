@@ -126,12 +126,24 @@ body {
   transition: background-color 200ms ease, color 200ms ease;
 }
 
+.no-theme-transition *,
+.no-theme-transition *::before,
+.no-theme-transition *::after {
+  transition: none !important;
+  animation: none !important;
+}
+
 /* ========== layout ========== */
 .wrap {
   grid-row: 2;
   width: min(660px, 100%);
   margin: clamp(16px, 4vw, 32px) auto;
   padding: 0 clamp(16px, 4vw, 32px);
+  padding-bottom: clamp(72px, 10vh, 128px);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  position: relative;
 }
 
 .stack > * + * {
@@ -186,9 +198,10 @@ h1 {
   justify-content: center;
   justify-items: center;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   margin-top: 16px;
   grid-template-columns: repeat(4, max-content);
+  grid-auto-columns: max-content;
   grid-template-areas: "add or mp3 wav";
 }
 
@@ -210,17 +223,17 @@ h1 {
 
 .row.actions .btn {
   min-width: 0;
-  padding-inline: 16px;
+  padding-inline: 12px;
 }
 
 .row.actions #btnAdd {
-  padding-inline: 18px;
+  padding-inline: 16px;
 }
 
 .row.actions #btnMp3,
 .row.actions #btnWav {
-  padding-inline: 12px;
-  min-width: 84px;
+  padding-inline: 6px;
+  min-width: 72px;
 }
 
 .or {
@@ -329,19 +342,21 @@ h1 {
 }
 
 .disclaimerLink {
-  position: fixed;
-  left: 18px;
-  bottom: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
   padding: 0;
   border: none;
   background: none;
   color: var(--link-muted);
   font: inherit;
-  text-decoration: underline;
+  text-decoration: none;
+  text-transform: lowercase;
   cursor: pointer;
   letter-spacing: 0.02em;
-  z-index: 9500;
   transition: color 160ms ease;
+  margin-left: auto;
+  align-self: flex-end;
 }
 
 .disclaimerLink:hover,
@@ -351,9 +366,6 @@ h1 {
 
 /* ========== theme toggle ========== */
 .themeToggle {
-  position: fixed;
-  top: 18px;
-  left: 18px;
   width: 42px;
   height: 42px;
   border-radius: 50%;
@@ -363,9 +375,10 @@ h1 {
   place-items: center;
   padding: 0;
   cursor: pointer;
-  z-index: 9600;
   transition: background-color 200ms ease, border-color 200ms ease, transform 160ms ease;
   backdrop-filter: blur(8px);
+  align-self: flex-start;
+  margin: 0 0 16px 0;
 }
 
 .themeToggle:hover,
@@ -451,7 +464,8 @@ code {
 
 .list {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;   /* ← switch to separate */
+  border-spacing: 0;           /* ← no gaps */
   min-width: min(520px, 100%);
 }
 
@@ -467,12 +481,14 @@ code {
 
 .list tbody td {
   padding: 10px 8px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: none;
   vertical-align: middle;
 }
 
 .list tbody tr {
   transition: background-color 160ms ease;
+  box-shadow: inset 0 -1px 0 var(--border);
+  border-bottom: 1px solid var(--border);
 }
 
 .list tbody tr[data-draggable="true"] {
@@ -509,8 +525,74 @@ code {
 }
 
 .colAct {
-  width: 200px;
-  text-align: left;
+  width: 1%;
+  min-width: 90px;
+  white-space: nowrap;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.colAct--optimistic {
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: right;
+}
+
+.colAct--optimistic .optimisticProgress {
+  flex: none;
+  margin-inline: 0;
+}
+
+.colAct--optimistic .action {
+  align-self: center;
+}
+
+.optimisticProgress {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  color: var(--muted);
+}
+
+.optimisticSpinner {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-left-color: transparent;
+  display: inline-block;
+  animation: optimisticSpinnerTurn 1.6s linear infinite;
+  opacity: 0.85;
+}
+
+@keyframes optimisticSpinnerTurn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .optimisticSpinner {
+    animation-duration: 2.8s;
+  }
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .action {
@@ -765,13 +847,15 @@ code {
 .listActions {
   margin-top: 16px;
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
+  flex-direction: row;
+  justify-content: center;
   gap: 8px;
+
+  
 }
 
 .listActions .btn {
-  min-width: 160px;
+  min-width: 140px;
 }
 
 /* ========== misc ========== */
@@ -837,46 +921,67 @@ header + .panel {
   }
 }
 
-@media (max-width: 520px) {
-  .row.actions {
-    grid-template-columns: repeat(2, max-content);
-    grid-template-areas:
-      "add or"
-      "mp3 wav";
-    row-gap: 12px;
-  }
-}
-
-@media (max-width: 340px) {
-  .row.actions {
-    grid-template-columns: max-content;
-    grid-template-areas:
-      "add"
-      "or"
-      "mp3"
-      "wav";
-  }
-}
-
 @media (max-width: 640px) {
   body {
-    grid-template-rows: auto;
+    display: block;
+    min-height: 100vh;
+    margin: 0;
+  }
+
+  .wrap {
+    grid-row: auto;
+    margin: 12px auto 28px;
+    padding: 0 clamp(14px, 6vw, 28px);
+    padding-bottom: clamp(104px, 18vh, 176px);
   }
 
   .themeToggle {
-    top: 14px;
-    left: 14px;
     width: 40px;
     height: 40px;
-  }
-
-  .disclaimerLink {
-    left: 12px;
-    bottom: 12px;
+    margin-bottom: 12px;
   }
 
   .thumbWrap {
     width: min(100%, 420px);
+  }
+
+  .foot {
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 8px;
+  }
+
+  .foot__made {
+    width: auto;
+    text-align: left;
+  }
+}
+
+@media (max-width: 640px) {
+  .row.actions {
+    grid-template-columns: repeat(3, max-content);
+    grid-template-areas: "add mp3 wav";
+  }
+
+  .row.actions .or {
+    display: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .row.actions { display: flex; gap: 12px; }
+  .row.actions .btn,
+  #btnMp3, #btnWav { flex: 1; min-width: 0; }
+}
+
+@media (max-width: 420px) {
+  .row.actions {
+    grid-template-columns: max-content;
+    grid-template-areas:
+      "add"
+      "mp3"
+      "wav";
   }
 }
 
@@ -892,10 +997,6 @@ header + .panel {
 
   .colDur {
     width: 76px;
-  }
-
-  .colAct {
-    width: 150px;
   }
 }
 
@@ -914,13 +1015,54 @@ header + .panel {
 
   .listActions {
     width: 100%;
+    align-items: center;
+    flex-direction: column
   }
+
 }
 
-@media (max-width: 480px) {
-  .tableScroll {
-    margin: 0 calc(var(--panel-pad) * -1);
-    padding: 0 var(--panel-pad) 6px;
+
+
+.foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  width: 100%;
+}
+
+.foot__made {
+  flex: none;
+  text-align: left;
+  margin-right: auto;
+}
+
+@media (min-width: 820px) {
+  .themeToggle {
+    position: fixed;
+    top: clamp(12px, 3vh, 24px);
+    left: clamp(12px, 3vw, 24px);
+    z-index: 20;
+    margin: 0;
+  }
+
+  .foot {
+    flex-direction: column;
+    align-items: flex-start;
+    align-self: flex-start;
+    width: auto;
+    gap: 6px;
+  }
+
+  .disclaimerLink {
+    position: fixed;
+    left: clamp(12px, 3vw, 24px);
+    right: auto;
+    bottom: clamp(12px, 4vh, 28px);
+    margin: 0;
+    z-index: 30;
   }
 }
 
