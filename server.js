@@ -708,7 +708,7 @@ app.post("/api/add", async (req, res) => {
     const audioQuality = (q === "320" || q === "320k") ? "320K" : "0"; // default V0
     const args = [];
 
-    const clientArg = used_client || metaR.usedClient || "";
+    const clientArg = metaR.usedClient || used_client || "";
     if (clientArg && clientArg.trim()) args.push("--extractor-args", clientArg);
     if (COOKIES_PATH) args.push("--cookies", COOKIES_PATH);
     if (YTDLP_EXTRA) args.push(...YTDLP_EXTRA.split(" ").filter(Boolean));
@@ -826,7 +826,7 @@ app.post("/api/convert", async (req, res) => {
   const tgt = String(target || "").toLowerCase();
   if (!["mp3", "wav"].includes(tgt)) return res.status(400).json({ error: "Invalid target (mp3|wav)" });
 
-  let dbgFormats = null, chosenFmt = null, clientArg = used_client || null, metaTitle = null;
+  let dbgFormats = null, chosenFmt = null, clientArg = null, metaTitle = null;
 
   try {
     const r = await getVideoMetaSmart(url);
@@ -837,7 +837,7 @@ app.post("/api/convert", async (req, res) => {
       });
     }
     metaTitle = r.meta?.title || null;
-    clientArg = clientArg || r.usedClient || "";
+    clientArg = r.usedClient || used_client || "";
 
     const candidates = (r.meta.formats || [])
       .map(f => ({
