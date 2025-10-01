@@ -269,8 +269,19 @@ function runYtDlp(args, opts = {}) {
 
 const COOKIES_PATH  = COOKIES_FILE;
 // You may force a client via env, e.g. YTDLP_EXTRACTOR_ARGS="youtube:player_client=web"
-const EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS || "";
+const EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS ?? "youtube:player_client=tv";
 const YTDLP_EXTRA    = process.env.YTDLP_EXTRA || "--force-ipv4"; // helps on some networks
+
+function splitArgs(str) {
+  if (!str) return [];
+  const re = /(?:[^\s"]+|"[^"]*")+/g;
+  const out = [];
+  for (const m of str.match(re) || []) {
+    out.push(m.replace(/^"|"$/g, ""));
+  }
+  return out;
+}
+
 
 function safeBase(title) {
   const s = String(title || "audio")
@@ -324,7 +335,7 @@ async function getVideoMetaDetailed(url, clientArg /* "youtube:player_client=web
   const args = ["-J", "--no-playlist", "--skip-download"];
   if (COOKIES_PATH) args.push("--cookies", COOKIES_PATH);
   if (clientArg && clientArg.trim()) args.push("--extractor-args", clientArg);
-  if (YTDLP_EXTRA) args.push(...YTDLP_EXTRA.split(" ").filter(Boolean));
+  if (YTDLP_EXTRA) args.push(...splitArgs(YTDLP_EXTRA));
   args.push(url);
 
   const { code, stdout, stderr } = await new Promise((resolve) => {
@@ -436,7 +447,7 @@ async function downloadSourceToTmp(url, formatId, clientArg /* pass-through */) 
   if (looksLikePath) args.push("--ffmpeg-location", FF.bin);
   if (COOKIES_PATH) args.push("--cookies", COOKIES_PATH);
   if (clientArg && clientArg.trim()) args.push("--extractor-args", clientArg);
-  if (YTDLP_EXTRA) args.push(...YTDLP_EXTRA.split(" ").filter(Boolean));
+  if (YTDLP_EXTRA) args.push(...splitArgs(YTDLP_EXTRA));
   args.push(
     "--no-playlist",
     "--restrict-filenames",
@@ -620,7 +631,8 @@ app.get("/api/zip", async (_req, res) => {
 
 // Probe: supports { fast: true } for quickest title/duration via web client
 app.post("/api/probe", async (req, res) => {
-  const { url, fast } = req.body || {};
+  let { url, fast } = req.body || {};
+  url = canonicalizeYouTube(url);
   if (!url || !/^https?:\/\//i.test(url)) return res.status(400).json({ error: "Invalid URL" });
   try {
     const r = fast
@@ -681,9 +693,25 @@ app.get("/api/add-progress/:token", (req, res) => {
   res.json({ progress: entry.value, done: entry.done });
 });
 
+
+function canonicalizeYouTube(u) {
+  try {
+    const url = new URL(u);
+    if (url.hostname === "youtu.be") {
+      const id = url.pathname.slice(1);
+      if (id) return `https://www.youtube.com/watch?v=${id}`;
+    }
+    if (url.hostname.endsWith("youtube.com")) {
+      const id = url.searchParams.get("v");
+      if (id) return `https://www.youtube.com/watch?v=${id}`;
+    }
+  } catch {}
+  return u;
+}
 // Add to the CD list (stores MP3 file to /downloads and updates the playlist)
 app.post("/api/add", async (req, res) => {
-  const { url, quality, format_id, client_token, used_client } = req.body || {};
+  let { url, quality, format_id, client_token, used_client } = req.body || {};
+  url = canonicalizeYouTube(url);
   if (!url || !/^https?:\/\//i.test(url)) return res.status(400).json({ error: "Invalid URL" });
 
   const metaR = await getVideoMetaSmart(url);
@@ -711,7 +739,7 @@ app.post("/api/add", async (req, res) => {
     const clientArg = metaR.usedClient || used_client || "";
     if (clientArg && clientArg.trim()) args.push("--extractor-args", clientArg);
     if (COOKIES_PATH) args.push("--cookies", COOKIES_PATH);
-    if (YTDLP_EXTRA) args.push(...YTDLP_EXTRA.split(" ").filter(Boolean));
+    if (YTDLP_EXTRA) args.push(...splitArgs(YTDLP_EXTRA));
 
     const looksLikePath =
       FF.bin && (FF.bin.startsWith("/") || FF.bin.includes("\\") || /^[A-Za-z]:\\/.test(FF.bin));
