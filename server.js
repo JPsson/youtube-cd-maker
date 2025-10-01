@@ -579,8 +579,9 @@ app.post("/api/probe", async (req, res) => {
   const { url, fast } = req.body || {};
   if (!url || !/^https?:\/\//i.test(url)) return res.status(400).json({ error: "Invalid URL" });
   try {
+    const fastClient = (EXTRACTOR_ARGS && EXTRACTOR_ARGS.trim()) || "youtube:player_client=web";
     const r = fast
-      ? await getVideoMetaDetailed(url, "youtube:player_client=web")
+      ? await getVideoMetaDetailed(url, fastClient)
       : await getVideoMetaSmart(url);
     if (!r.ok) return res.status(400).json({ error: "Failed to read metadata", detail: r.error, code: r.code, stderr: r.stderr });
 
