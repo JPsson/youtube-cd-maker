@@ -26,6 +26,7 @@ await fsp.mkdir(config.tmpDir, { recursive: true });
 const ENV_COOKIES_PATH = process.env.COOKIES_PATH || null;
 const ENV_COOKIES_TEXT = process.env.COOKIES_TEXT || null;
 const ENV_COOKIES_BASE64 = process.env.COOKIES_BASE64 || null;
+const DEFAULT_COOKIES_FILENAME = "cookies.txt";
 
 async function materializeCookiesFromEnv() {
   if (ENV_COOKIES_PATH) return ENV_COOKIES_PATH;
@@ -47,7 +48,37 @@ async function materializeCookiesFromEnv() {
   return target;
 }
 
-const COOKIES_FILE = await materializeCookiesFromEnv();
+async function detectCookiesFile() {
+  const fromEnv = await materializeCookiesFromEnv();
+  if (fromEnv) {
+    return {
+      path: fromEnv,
+      source: ENV_COOKIES_PATH ? "path" : "env",
+    };
+  }
+
+  const defaultPath = path.join(__dirname, DEFAULT_COOKIES_FILENAME);
+  try {
+    const stat = await fsp.stat(defaultPath);
+    if (stat.isFile()) {
+      return {
+        path: defaultPath,
+        source: "file",
+      };
+    }
+  } catch (err) {
+    if (err && err.code !== "ENOENT") {
+      console.warn("[cookies] Failed to access default cookies file:", err?.message || err);
+    }
+  }
+
+  return { path: null, source: null };
+}
+
+const COOKIES_INFO = await detectCookiesFile();
+if (COOKIES_INFO.path) {
+  console.log(`[cookies] Using ${COOKIES_INFO.source} cookies file at ${COOKIES_INFO.path}`);
+}
 
 const app = express();
 
@@ -267,7 +298,8 @@ function runYtDlp(args, opts = {}) {
   return spawn(YD.bin, args, opts);
 }
 
-const COOKIES_PATH  = COOKIES_FILE;
+const COOKIES_PATH  = COOKIES_INFO.path;
+const COOKIES_SOURCE = COOKIES_INFO.source;
 // You may force a client via env, e.g. YTDLP_EXTRACTOR_ARGS="youtube:player_client=web"
 const EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS ?? "youtube:player_client=tv";
 const YTDLP_EXTRA    = process.env.YTDLP_EXTRA || "--force-ipv4"; // helps on some networks
@@ -519,7 +551,7 @@ app.get("/api/diag", async (_req, res) => {
     zip: ZIP,
     cookies: {
       path: COOKIES_PATH,
-      source: ENV_COOKIES_PATH ? "path" : (ENV_COOKIES_TEXT || ENV_COOKIES_BASE64 ? "env" : null),
+      source: COOKIES_SOURCE,
     },
   });
 });
