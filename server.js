@@ -515,32 +515,41 @@ async function transcodeToWav4416(inputPath) {
   return out;
 }
 
-function encodeContentDisposition(name) {
-  const raw = (name ?? "download").toString();
-  const fallback = raw
-    .replace(/["\\\r\n;%]+/g, "_")
-    .replace(/[^\x20-\x7E]+/g, "_")
-    .trim() || "download";
-  const encoded = encodeURIComponent(raw);
-  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
-}
+async function moveIntoDownloads(tmpPath, desiredName) {
+  const ext = path.extname(desiredName);
+  const stem = path.basename(desiredName, ext) || "download";
+  const safeStem = safeBase(stem);
+  const safeExt = ext && ext.startsWith(".") ? ext : ext ? `.${ext}` : "";
 
-function streamAndUnlink(res, filePath, downloadName, mimeOverride) {
-  const ext = path.extname(filePath).toLowerCase();
-  let mime = mimeOverride;
-  if (!mime) {
-    if (ext === ".mp3") mime = "audio/mpeg";
-    else if (ext === ".wav") mime = "audio/wav";
-    else if (ext === ".zip") mime = "application/zip";
-    else mime = "application/octet-stream";
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    const suffix = attempt === 0 ? "" : ` (${attempt})`;
+    const filename = `${safeStem}${suffix}${safeExt}`;
+    const destPath = path.join(config.downloadDir, filename);
+
+    try {
+      await fsp.access(destPath);
+      continue; // file exists, try next suffix
+    } catch (err) {
+      if (err?.code !== "ENOENT") throw err;
+    }
+
+    try {
+      await fsp.rename(tmpPath, destPath);
+      return { path: destPath, filename };
+    } catch (err) {
+      if (err?.code === "EEXIST") {
+        continue;
+      }
+      if (err?.code === "EXDEV") {
+        await fsp.copyFile(tmpPath, destPath);
+        await fsp.unlink(tmpPath);
+        return { path: destPath, filename };
+      }
+      throw err;
+    }
   }
-  const rs = fs.createReadStream(filePath);
-  res.setHeader("Content-Type", mime);
-  res.setHeader("Content-Disposition", encodeContentDisposition(downloadName));
-  rs.pipe(res);
-  rs.on("close", async () => {
-    try { await fsp.unlink(filePath); } catch {}
-  });
+
+  throw new Error("Failed to allocate download filename");
 }
 
 // --------------------------- Routes ------------------------------
@@ -597,7 +606,7 @@ app.get("/api/file/:id", (req, res) => {
   res.download(item.filepath, path.basename(item.filepath));
 });
 
-app.get("/api/zip", async (_req, res) => {
+app.post("/api/zip", async (_req, res) => {
   if (!playlistStore.items.length) {
     return res.status(400).json({ error: "Playlist is empty" });
   }
@@ -637,15 +646,31 @@ app.get("/api/zip", async (_req, res) => {
       stagedFiles.push(stagedPath);
     }
 
-    const zipPath = path.join(config.tmpDir, `cd-${nanoid(10)}.zip`);
+    let zipPath = path.join(config.tmpDir, `cd-${nanoid(10)}.zip`);
     const args = ["-j", "-q", zipPath, ...stagedFiles];
     const { code, stderr } = await run(ZIP.bin, args);
     if (code !== 0 || !fs.existsSync(zipPath)) {
       throw new Error(stderr || `zip exited with code ${code}`);
     }
 
-    const downloadName = `${safeBase("cd-playlist")}.zip`;
-    streamAndUnlink(res, zipPath, downloadName, "application/zip");
+    let finalInfo = null;
+    try {
+      const downloadName = `${safeBase("cd-playlist")}.zip`;
+      finalInfo = await moveIntoDownloads(zipPath, downloadName);
+      zipPath = null;
+    } catch (err) {
+      if (zipPath) await safeUnlink(zipPath);
+      throw err;
+    }
+
+    const stat = await fsp.stat(finalInfo.path).catch(() => null);
+
+    res.json({
+      ok: true,
+      href: `/downloads/${encodeURIComponent(finalInfo.filename)}`,
+      filename: finalInfo.filename,
+      sizeBytes: stat?.size ?? null,
+    });
   } catch (err) {
     console.error("[zip] error:", err?.message || err);
     if (!res.headersSent) {
@@ -879,7 +904,7 @@ app.post("/api/add", async (req, res) => {
   }
 });
 
-// One-off conversion endpoint (MP3 or WAV) that streams a download
+// One-off conversion endpoint (MP3 or WAV) that prepares a download link
 app.post("/api/convert", async (req, res) => {
   const { url, target, format_id, used_client } = req.body || {};
   if (!url || !/^https?:\/\//i.test(url)) return res.status(400).json({ error: "Invalid URL" });
@@ -929,17 +954,36 @@ app.post("/api/convert", async (req, res) => {
 
     const src = await downloadSourceToTmp(url, fmtId, clientArg);
 
-    let out;
-    if (tgt === "mp3") {
-      out = await transcodeToMp3V0(src);      // VBR V0 (best from lossy source)
-    } else {
-      out = await transcodeToWav4416(src);    // 44.1kHz/16-bit (CD)
+    let outPath = null;
+    try {
+      if (tgt === "mp3") {
+        outPath = await transcodeToMp3V0(src);      // VBR V0 (best from lossy source)
+      } else {
+        outPath = await transcodeToWav4416(src);    // 44.1kHz/16-bit (CD)
+      }
+    } finally {
+      try { await fsp.unlink(src); } catch {}
     }
-    try { await fsp.unlink(src); } catch {}
 
-    const base = safeBase(metaTitle);
-    const downloadName = `${base}.${tgt}`;
-    streamAndUnlink(res, out, downloadName);
+    let finalInfo = null;
+    try {
+      const base = safeBase(metaTitle);
+      const downloadName = `${base}.${tgt}`;
+      finalInfo = await moveIntoDownloads(outPath, downloadName);
+      outPath = null;
+    } catch (err) {
+      if (outPath) await safeUnlink(outPath);
+      throw err;
+    }
+
+    const stat = await fsp.stat(finalInfo.path).catch(() => null);
+
+    res.json({
+      ok: true,
+      href: `/downloads/${encodeURIComponent(finalInfo.filename)}`,
+      filename: finalInfo.filename,
+      sizeBytes: stat?.size ?? null,
+    });
 
   } catch (e) {
     console.error("[convert] error:", e?.message || e);

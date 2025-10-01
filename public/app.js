@@ -850,6 +850,19 @@ function describeFormat(bf) {
   return parts.join(" · ");
 }
 
+function triggerBrowserDownload(href, filename) {
+  if (!href) return false;
+  const a = document.createElement("a");
+  a.href = href;
+  if (filename) a.download = filename;
+  a.rel = "noopener";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  return true;
+}
+
 async function oneOffDownload(target) {
   const url = dom.url.value.trim();
   if (!url) return;
@@ -947,15 +960,14 @@ async function oneOffDownload(target) {
       return;
     }
 
-    const cd = r.headers.get("Content-Disposition") || "";
-    const fn = /filename="([^"]+)"/.exec(cd)?.[1] || `audio.${target}`;
-    const blob = await r.blob();
-    const href = URL.createObjectURL(blob);
-    const a = Object.assign(document.createElement("a"), { href, download: fn });
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(href);
+    const result = await r.json().catch(() => null);
+    const href = result?.href;
+    const filename = result?.filename || `audio.${target}`;
+    if (!result?.ok || !href) {
+      setPickedNoteError(result?.message || "Download link was not provided.");
+      return;
+    }
+    triggerBrowserDownload(href, filename);
   } catch (e) {
     setPickedNoteError(`Network error: ${e.message || e}`);
   } finally {
@@ -976,21 +988,20 @@ async function handleZipDownload() {
   dotsAnimator.start();
 
   try {
-    const r = await fetch("/api/zip");
+    const r = await fetch("/api/zip", { method: "POST" });
     if (!r.ok) {
       const txt = await r.text();
       setPickedNoteError(`Failed to create ZIP: ${txt || r.statusText}`);
       return;
     }
-    const cd = r.headers.get("Content-Disposition") || "";
-    const fn = /filename="([^"]+)"/.exec(cd)?.[1] || "cd-collection.zip";
-    const blob = await r.blob();
-    const href = URL.createObjectURL(blob);
-    const a = Object.assign(document.createElement("a"), { href, download: fn });
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(href);
+    const result = await r.json().catch(() => null);
+    const href = result?.href;
+    const filename = result?.filename || "cd-collection.zip";
+    if (!result?.ok || !href) {
+      setPickedNoteError(result?.message || "Failed to prepare ZIP download.");
+      return;
+    }
+    triggerBrowserDownload(href, filename);
   } catch (e) {
     setPickedNoteError(`Failed to create ZIP: ${e.message || e}`);
   } finally {
