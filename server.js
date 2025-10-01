@@ -241,10 +241,20 @@ function runYtDlp(args, opts = {}) {
   return spawn(YD.bin, args, opts);
 }
 
-const COOKIES_PATH  = process.env.COOKIES_PATH || null;
+const COOKIES_PATH = process.env.COOKIES_PATH || null;
 // Default to TV client to dodge SABR limits; override with YTDLP_EXTRACTOR_ARGS if needed.
-const EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS ?? "youtube:player_client=tv";
-const YTDLP_EXTRA    = process.env.YTDLP_EXTRA || "--force-ipv4"; // helps on some networks
+const RAW_EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS;
+const EXTRACTOR_ARGS = (RAW_EXTRACTOR_ARGS === undefined
+  ? "youtube:player_client=tv"
+  : RAW_EXTRACTOR_ARGS || ""
+).trim();
+const YTDLP_EXTRA = process.env.YTDLP_EXTRA || "--force-ipv4"; // helps on some networks
+
+function resolveExtractorArgs(preferred) {
+  const trimmed = preferred && preferred.trim();
+  if (trimmed) return trimmed;
+  return EXTRACTOR_ARGS || "";
+}
 
 function safeBase(title) {
   const s = String(title || "audio")
@@ -297,7 +307,8 @@ async function getVideoMetaDetailed(url, clientArg /* "youtube:player_client=web
   requireBinsOrThrow();
   const args = ["-J", "--no-playlist", "--skip-download"];
   if (COOKIES_PATH) args.push("--cookies", COOKIES_PATH);
-  if (clientArg && clientArg.trim()) args.push("--extractor-args", clientArg);
+  const resolvedClient = resolveExtractorArgs(clientArg);
+  if (resolvedClient) args.push("--extractor-args", resolvedClient);
   if (YTDLP_EXTRA) args.push(...YTDLP_EXTRA.split(" ").filter(Boolean));
   args.push(url);
 
@@ -310,20 +321,21 @@ async function getVideoMetaDetailed(url, clientArg /* "youtube:player_client=web
     p.on("close", (c) => resolve({ code: c, stdout: out, stderr: err }));
   });
 
-  if (code !== 0) return { ok: false, error: "yt-dlp failed", code, stdout, stderr, usedClient: clientArg || null };
+  if (code !== 0) return { ok: false, error: "yt-dlp failed", code, stdout, stderr, usedClient: resolvedClient || null };
 
   try {
     const meta = JSON.parse(stdout);
-    return { ok: true, meta, stdout, stderr, usedClient: clientArg || null };
+    return { ok: true, meta, stdout, stderr, usedClient: resolvedClient || null };
   } catch {
-    return { ok: false, error: "JSON parse failed", code, stdout, stderr, usedClient: clientArg || null };
+    return { ok: false, error: "JSON parse failed", code, stdout, stderr, usedClient: resolvedClient || null };
   }
 }
 
 // Try clients in parallel; prefer first that yields audio-only (>=44.1k) by priority order,
 // else the richest success; else first failure.
 async function getVideoMetaSmart(url) {
-  if (EXTRACTOR_ARGS) return getVideoMetaDetailed(url, EXTRACTOR_ARGS);
+  const defaultClient = resolveExtractorArgs(null);
+  if (defaultClient) return getVideoMetaDetailed(url, defaultClient);
 
   const clients = ["youtube:player_client=web", "youtube:player_client=ios", "youtube:player_client=android", ""];
   const promises = clients.map(c => getVideoMetaDetailed(url, c));
@@ -399,7 +411,8 @@ async function downloadSourceToTmp(url, formatId, clientArg /* pass-through */) 
   const args = [];
   if (formatId) args.push("-f", String(formatId));
   if (COOKIES_PATH) args.push("--cookies", COOKIES_PATH);
-  if (clientArg && clientArg.trim()) args.push("--extractor-args", clientArg);
+  const resolvedClient = resolveExtractorArgs(clientArg);
+  if (resolvedClient) args.push("--extractor-args", resolvedClient);
   if (YTDLP_EXTRA) args.push(...YTDLP_EXTRA.split(" ").filter(Boolean));
   args.push(
     "--no-playlist",
@@ -579,7 +592,7 @@ app.post("/api/probe", async (req, res) => {
   const { url, fast } = req.body || {};
   if (!url || !/^https?:\/\//i.test(url)) return res.status(400).json({ error: "Invalid URL" });
   try {
-    const fastClient = (EXTRACTOR_ARGS && EXTRACTOR_ARGS.trim()) || "youtube:player_client=web";
+    const fastClient = resolveExtractorArgs(null) || "youtube:player_client=web";
     const r = fast
       ? await getVideoMetaDetailed(url, fastClient)
       : await getVideoMetaSmart(url);
@@ -665,8 +678,8 @@ app.post("/api/add", async (req, res) => {
     const audioQuality = (q === "320" || q === "320k") ? "320K" : "0"; // default V0
     const args = [];
 
-    const clientArg = used_client || metaR.usedClient || "";
-    if (clientArg && clientArg.trim()) args.push("--extractor-args", clientArg);
+    const clientArg = resolveExtractorArgs(used_client || metaR.usedClient || "");
+    if (clientArg) args.push("--extractor-args", clientArg);
     if (COOKIES_PATH) args.push("--cookies", COOKIES_PATH);
     if (YTDLP_EXTRA) args.push(...YTDLP_EXTRA.split(" ").filter(Boolean));
 
@@ -783,7 +796,7 @@ app.post("/api/convert", async (req, res) => {
   const tgt = String(target || "").toLowerCase();
   if (!["mp3", "wav"].includes(tgt)) return res.status(400).json({ error: "Invalid target (mp3|wav)" });
 
-  let dbgFormats = null, chosenFmt = null, clientArg = used_client || null, metaTitle = null;
+  let dbgFormats = null, chosenFmt = null, clientArg = resolveExtractorArgs(used_client || null) || null, metaTitle = null;
 
   try {
     const r = await getVideoMetaSmart(url);
@@ -794,7 +807,7 @@ app.post("/api/convert", async (req, res) => {
       });
     }
     metaTitle = r.meta?.title || null;
-    clientArg = clientArg || r.usedClient || "";
+    clientArg = resolveExtractorArgs(clientArg || r.usedClient || "") || "";
 
     const candidates = (r.meta.formats || [])
       .map(f => ({
