@@ -23,6 +23,32 @@ const config = {
 await fsp.mkdir(config.downloadDir, { recursive: true });
 await fsp.mkdir(config.tmpDir, { recursive: true });
 
+const ENV_COOKIES_PATH = process.env.COOKIES_PATH || null;
+const ENV_COOKIES_TEXT = process.env.COOKIES_TEXT || null;
+const ENV_COOKIES_BASE64 = process.env.COOKIES_BASE64 || null;
+
+async function materializeCookiesFromEnv() {
+  if (ENV_COOKIES_PATH) return ENV_COOKIES_PATH;
+
+  let rawText = ENV_COOKIES_TEXT;
+  if (ENV_COOKIES_BASE64) {
+    try {
+      rawText = Buffer.from(ENV_COOKIES_BASE64, "base64").toString("utf8");
+    } catch (err) {
+      console.warn("[cookies] Failed to decode COOKIES_BASE64:", err?.message || err);
+      return null;
+    }
+  }
+
+  if (!rawText || !rawText.trim()) return null;
+
+  const target = path.join(config.tmpDir, "cookies-env.txt");
+  await fsp.writeFile(target, rawText, "utf8");
+  return target;
+}
+
+const COOKIES_FILE = await materializeCookiesFromEnv();
+
 const app = express();
 
 app.use(express.json());
@@ -241,7 +267,7 @@ function runYtDlp(args, opts = {}) {
   return spawn(YD.bin, args, opts);
 }
 
-const COOKIES_PATH  = process.env.COOKIES_PATH || null;
+const COOKIES_PATH  = COOKIES_FILE;
 // You may force a client via env, e.g. YTDLP_EXTRACTOR_ARGS="youtube:player_client=web"
 const EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS || "";
 const YTDLP_EXTRA    = process.env.YTDLP_EXTRA || "--force-ipv4"; // helps on some networks
@@ -325,7 +351,14 @@ async function getVideoMetaDetailed(url, clientArg /* "youtube:player_client=web
 async function getVideoMetaSmart(url) {
   if (EXTRACTOR_ARGS) return getVideoMetaDetailed(url, EXTRACTOR_ARGS);
 
-  const clients = ["youtube:player_client=web", "youtube:player_client=ios", "youtube:player_client=android", ""];
+  const clients = [
+    "youtube:player_client=tv",
+    "youtube:player_client=tv_embedded",
+    "youtube:player_client=web",
+    "youtube:player_client=ios",
+    "youtube:player_client=android",
+    "",
+  ];
   const promises = clients.map(c => getVideoMetaDetailed(url, c));
   const results  = await Promise.all(promises);
 
@@ -398,6 +431,9 @@ async function downloadSourceToTmp(url, formatId, clientArg /* pass-through */) 
   const outTmpl = path.join(config.tmpDir, "%(title)s-%(id)s.%(ext)s");
   const args = [];
   if (formatId) args.push("-f", String(formatId));
+  const looksLikePath =
+    FF.bin && (FF.bin.startsWith("/") || FF.bin.includes("\\") || /^[A-Za-z]:\\/.test(FF.bin));
+  if (looksLikePath) args.push("--ffmpeg-location", FF.bin);
   if (COOKIES_PATH) args.push("--cookies", COOKIES_PATH);
   if (clientArg && clientArg.trim()) args.push("--extractor-args", clientArg);
   if (YTDLP_EXTRA) args.push(...YTDLP_EXTRA.split(" ").filter(Boolean));
@@ -466,7 +502,15 @@ function streamAndUnlink(res, filePath, downloadName, mimeOverride) {
 
 // --------------------------- Routes ------------------------------
 app.get("/api/diag", async (_req, res) => {
-  res.json({ ffmpeg: FF, ytdlp: YD, zip: ZIP });
+  res.json({
+    ffmpeg: FF,
+    ytdlp: YD,
+    zip: ZIP,
+    cookies: {
+      path: COOKIES_PATH,
+      source: ENV_COOKIES_PATH ? "path" : (ENV_COOKIES_TEXT || ENV_COOKIES_BASE64 ? "env" : null),
+    },
+  });
 });
 
 app.get("/api/list", (_req, res) => {
