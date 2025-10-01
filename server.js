@@ -242,8 +242,8 @@ function runYtDlp(args, opts = {}) {
 }
 
 const COOKIES_PATH  = process.env.COOKIES_PATH || null;
-// You may force a client via env, e.g. YTDLP_EXTRACTOR_ARGS="youtube:player_client=web"
-const EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS || "";
+// Default to TV client to dodge SABR limits; override with YTDLP_EXTRACTOR_ARGS if needed.
+const EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS ?? "youtube:player_client=tv";
 const YTDLP_EXTRA    = process.env.YTDLP_EXTRA || "--force-ipv4"; // helps on some networks
 
 function safeBase(title) {
