@@ -850,16 +850,46 @@ function describeFormat(bf) {
   return parts.join(" · ");
 }
 
-function triggerBrowserDownload(href, filename) {
+function triggerBrowserDownload(href) {
   if (!href) return false;
-  const a = document.createElement("a");
-  a.href = href;
-  if (filename) a.download = filename;
-  a.rel = "noopener";
-  a.style.display = "none";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  let url;
+  try {
+    url = new URL(href, window.location.origin).toString();
+  } catch (err) {
+    url = href;
+  }
+
+  const iframe = document.createElement("iframe");
+  iframe.src = url;
+  iframe.style.display = "none";
+  iframe.setAttribute("aria-hidden", "true");
+
+  let cleanupTimer = null;
+
+  const cleanup = () => {
+    if (cleanupTimer) {
+      clearTimeout(cleanupTimer);
+      cleanupTimer = null;
+    }
+    setTimeout(() => {
+      if (iframe.parentNode) {
+        iframe.remove();
+      }
+    }, 1000);
+  };
+
+  iframe.addEventListener("load", cleanup, { once: true });
+  iframe.addEventListener("error", () => {
+    cleanup();
+    try {
+      window.location.assign(url);
+    } catch {
+      window.location.href = url;
+    }
+  }, { once: true });
+
+  cleanupTimer = setTimeout(cleanup, 60_000);
+  document.body.appendChild(iframe);
   return true;
 }
 
@@ -962,12 +992,11 @@ async function oneOffDownload(target) {
 
     const result = await r.json().catch(() => null);
     const href = result?.href;
-    const filename = result?.filename || `audio.${target}`;
     if (!result?.ok || !href) {
       setPickedNoteError(result?.message || "Download link was not provided.");
       return;
     }
-    triggerBrowserDownload(href, filename);
+    triggerBrowserDownload(href);
   } catch (e) {
     setPickedNoteError(`Network error: ${e.message || e}`);
   } finally {
@@ -996,12 +1025,11 @@ async function handleZipDownload() {
     }
     const result = await r.json().catch(() => null);
     const href = result?.href;
-    const filename = result?.filename || "cd-collection.zip";
     if (!result?.ok || !href) {
       setPickedNoteError(result?.message || "Failed to prepare ZIP download.");
       return;
     }
-    triggerBrowserDownload(href, filename);
+    triggerBrowserDownload(href);
   } catch (e) {
     setPickedNoteError(`Failed to create ZIP: ${e.message || e}`);
   } finally {

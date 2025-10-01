@@ -84,7 +84,55 @@ const app = express();
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
-app.use("/downloads", express.static(config.downloadDir));
+
+async function serveDownload(req, res, { head = false } = {}) {
+  const rawName = req.params.filename || "";
+  if (rawName.includes("/") || rawName.includes("\\")) {
+    return res.status(400).json({ error: "Invalid filename" });
+  }
+  const filename = path.basename(rawName);
+  if (!filename || filename === "." || filename === ".." || filename !== rawName) {
+    return res.status(400).json({ error: "Invalid filename" });
+  }
+
+  const filePath = path.join(config.downloadDir, filename);
+  let stat;
+  try {
+    stat = await fsp.stat(filePath);
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      return res.status(404).json({ error: "File not found" });
+    }
+    console.error("[downloads] stat failed:", err?.message || err);
+    return res.status(500).json({ error: "Failed to read download" });
+  }
+
+  if (!stat.isFile()) {
+    return res.status(404).json({ error: "File not found" });
+  }
+
+  if (head) {
+    res.setHeader("Content-Length", stat.size);
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    return res.status(200).end();
+  }
+
+  return res.download(filePath, filename, (err) => {
+    if (!err) return;
+    if (err?.code === "ENOENT") {
+      if (!res.headersSent) res.status(404).json({ error: "File not found" });
+      return;
+    }
+    console.error("[downloads] send failed:", err?.message || err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to send download" });
+    }
+  });
+}
+
+app.get("/downloads/:filename", (req, res) => serveDownload(req, res));
+app.head("/downloads/:filename", (req, res) => serveDownload(req, res, { head: true }));
 
 class PlaylistStore {
   constructor(capSeconds) {
