@@ -8,6 +8,7 @@ import fsp from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import { nanoid } from "nanoid";
+import { createHash } from "crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -18,10 +19,200 @@ const config = {
   capSeconds: 80 * 60,
   downloadDir: path.join(__dirname, "downloads"),
   tmpDir: path.join(__dirname, "tmp"),
+  sessionIdleTtlMs: Number(process.env.SESSION_IDLE_TTL_MS) || 1000 * 60 * 60 * 6, // 6 hours
+  downloadTokenTtlMs: Number(process.env.DOWNLOAD_TOKEN_TTL_MS) || 1000 * 60 * 30, // 30 minutes
+  cookieSecure: process.env.COOKIE_SECURE === "true",
 };
 
 await fsp.mkdir(config.downloadDir, { recursive: true });
 await fsp.mkdir(config.tmpDir, { recursive: true });
+
+const SESSION_COOKIE_NAME = "cd_sid";
+const SESSION_COOKIE_MAX_AGE = Math.max(60_000, config.sessionIdleTtlMs);
+const DOWNLOAD_TOKEN_TTL = Math.max(60_000, config.downloadTokenTtlMs);
+
+const sessionContexts = new Map(); // sid -> context
+const sessionCreationPromises = new Map(); // sid -> promise
+const downloadTokenIndex = new Map(); // token -> { sessionId, path, filename, expiresAt }
+
+function parseCookies(header) {
+  const out = Object.create(null);
+  if (!header || typeof header !== "string") return out;
+  const parts = header.split(/;\s*/);
+  for (const part of parts) {
+    if (!part) continue;
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    const key = part.slice(0, eq).trim();
+    if (!key) continue;
+    let value = part.slice(eq + 1).trim();
+    if (value.startsWith("\"")) {
+      value = value.slice(1, -1);
+    }
+    try {
+      value = decodeURIComponent(value);
+    } catch {
+      // ignore decode errors
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+function setCookie(res, value) {
+  const prev = res.getHeader("Set-Cookie");
+  if (!prev) {
+    res.setHeader("Set-Cookie", value);
+  } else if (Array.isArray(prev)) {
+    res.setHeader("Set-Cookie", [...prev, value]);
+  } else {
+    res.setHeader("Set-Cookie", [prev, value]);
+  }
+}
+
+function buildSessionCookie(id) {
+  const parts = [
+    `${SESSION_COOKIE_NAME}=${id}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Max-Age=${Math.floor(SESSION_COOKIE_MAX_AGE / 1000)}`,
+  ];
+  if (config.cookieSecure) {
+    parts.push("Secure");
+  }
+  return parts.join("; ");
+}
+
+function sanitizeSessionId(id) {
+  return typeof id === "string" && /^[A-Za-z0-9_-]{10,}$/u.test(id) ? id : null;
+}
+
+function sessionFsKey(id) {
+  return createHash("sha256").update(String(id)).digest("hex").slice(0, 32);
+}
+
+async function ensureDir(dir) {
+  await fsp.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+async function createSessionContext(sessionId) {
+  const key = sessionFsKey(sessionId);
+  const sessionTmpRoot = path.join(config.tmpDir, `session-${key}`);
+  const trackDir = path.join(sessionTmpRoot, "tracks");
+  const scratchDir = path.join(sessionTmpRoot, "scratch");
+  const downloadsDir = path.join(config.downloadDir, `session-${key}`);
+
+  await Promise.all([
+    ensureDir(sessionTmpRoot),
+    ensureDir(trackDir),
+    ensureDir(scratchDir),
+    ensureDir(downloadsDir),
+  ]);
+
+  return {
+    id: sessionId,
+    key,
+    playlist: new PlaylistStore(config.capSeconds),
+    trackDir,
+    scratchDir,
+    downloadsDir,
+    downloadTokens: new Set(),
+    lastAccess: Date.now(),
+  };
+}
+
+async function getSessionContext(req) {
+  const sid = req.sessionId;
+  if (!sid) throw new Error("Session ID missing");
+  const existing = sessionContexts.get(sid);
+  if (existing) {
+    existing.lastAccess = Date.now();
+    return existing;
+  }
+
+  let pending = sessionCreationPromises.get(sid);
+  if (!pending) {
+    pending = (async () => {
+      const ctx = await createSessionContext(sid);
+      sessionContexts.set(sid, ctx);
+      sessionCreationPromises.delete(sid);
+      return ctx;
+    })();
+    sessionCreationPromises.set(sid, pending);
+  }
+
+  const ctx = await pending;
+  ctx.lastAccess = Date.now();
+  return ctx;
+}
+
+async function destroySessionContext(sessionId) {
+  const ctx = sessionContexts.get(sessionId);
+  if (!ctx) return;
+  sessionContexts.delete(sessionId);
+  sessionCreationPromises.delete(sessionId);
+
+  for (const token of ctx.downloadTokens) {
+    dropDownloadToken(token, downloadTokenIndex.get(token));
+  }
+  ctx.downloadTokens.clear();
+
+  const cleared = ctx.playlist.clear();
+  await Promise.allSettled(cleared.map((item) => safeUnlink(item?.filepath)));
+
+  const dirs = [ctx.trackDir, ctx.scratchDir, ctx.downloadsDir, path.join(config.tmpDir, `session-${ctx.key}`)];
+  await Promise.allSettled(dirs.map(async (dir) => {
+    try {
+      await fsp.rm(dir, { recursive: true, force: true });
+    } catch {}
+  }));
+}
+
+function purgeDownloadTokens() {
+  const now = Date.now();
+  for (const [token, entry] of downloadTokenIndex) {
+    if (!entry || entry.expiresAt <= now) {
+      dropDownloadToken(token, entry);
+    }
+  }
+}
+
+async function purgeStaleSessions() {
+  const now = Date.now();
+  const sweeps = [];
+  for (const [sid, ctx] of sessionContexts) {
+    if (!ctx || ctx.lastAccess + SESSION_COOKIE_MAX_AGE <= now) {
+      sweeps.push(destroySessionContext(sid));
+    }
+  }
+  if (sweeps.length) {
+    await Promise.allSettled(sweeps);
+  }
+}
+
+setInterval(() => {
+  purgeDownloadTokens();
+  purgeStaleSessions().catch((err) => {
+    console.warn("[session] sweep failed:", err?.message || err);
+  });
+}, Math.min(SESSION_COOKIE_MAX_AGE, 1000 * 60 * 10)).unref?.();
+
+function sessionCookieMiddleware(req, res, next) {
+  const cookies = parseCookies(req.headers?.cookie);
+  let sid = sanitizeSessionId(cookies[SESSION_COOKIE_NAME]);
+  if (!sid) {
+    sid = nanoid(24);
+  }
+  req.sessionId = sid;
+  try {
+    setCookie(res, buildSessionCookie(sid));
+  } catch (err) {
+    console.warn("[session] failed to set cookie:", err?.message || err);
+  }
+  next();
+}
 
 const ENV_COOKIES_PATH = process.env.COOKIES_PATH || null;
 const ENV_COOKIES_TEXT = process.env.COOKIES_TEXT || null;
@@ -82,9 +273,92 @@ if (COOKIES_INFO.path) {
 
 const app = express();
 
+app.use(sessionCookieMiddleware);
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
-app.use("/downloads", express.static(config.downloadDir));
+
+async function serveDownload(req, res, { head = false } = {}) {
+  purgeDownloadTokens();
+
+  const token = req.params.token || "";
+  if (!token || typeof token !== "string") {
+    return res.status(404).json({ error: "Download expired" });
+  }
+
+  const entry = downloadTokenIndex.get(token);
+  if (!entry) {
+    return res.status(404).json({ error: "Download expired" });
+  }
+
+  if (!req.sessionId || req.sessionId !== entry.sessionId) {
+    return res.status(403).json({ error: "Unauthorized" });
+  }
+
+  let stat;
+  try {
+    stat = await fsp.stat(entry.path);
+  } catch (err) {
+    dropDownloadToken(token, entry);
+    if (err?.code === "ENOENT") {
+      return res.status(404).json({ error: "File not found" });
+    }
+    console.error("[downloads] stat failed:", err?.message || err);
+    return res.status(500).json({ error: "Failed to read download" });
+  }
+
+  if (!stat.isFile()) {
+    dropDownloadToken(token, entry);
+    return res.status(404).json({ error: "File not found" });
+  }
+
+  entry.expiresAt = Date.now() + DOWNLOAD_TOKEN_TTL;
+  const ctx = sessionContexts.get(entry.sessionId);
+  if (ctx) ctx.lastAccess = Date.now();
+
+  if (head) {
+    res.setHeader("Content-Length", stat.size);
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Disposition", `attachment; filename="${entry.filename}"`);
+    return res.status(200).end();
+  }
+
+  return res.download(entry.path, entry.filename, (err) => {
+    if (!err) return;
+    if (err?.code === "ENOENT") {
+      dropDownloadToken(token, entry);
+      if (!res.headersSent) res.status(404).json({ error: "File not found" });
+      return;
+    }
+    console.error("[downloads] send failed:", err?.message || err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to send download" });
+    }
+  });
+}
+
+app.get("/downloads/:token", (req, res) => serveDownload(req, res));
+app.head("/downloads/:token", (req, res) => serveDownload(req, res, { head: true }));
+
+function registerDownloadToken(ctx, filePath, filename) {
+  if (!ctx) throw new Error("Session context missing");
+  const token = nanoid(21);
+  downloadTokenIndex.set(token, {
+    sessionId: ctx.id,
+    path: filePath,
+    filename,
+    expiresAt: Date.now() + DOWNLOAD_TOKEN_TTL,
+  });
+  ctx.downloadTokens.add(token);
+  ctx.lastAccess = Date.now();
+  return token;
+}
+
+function dropDownloadToken(token, entry) {
+  downloadTokenIndex.delete(token);
+  if (!entry) return;
+  const ctx = entry.sessionId ? sessionContexts.get(entry.sessionId) : null;
+  ctx?.downloadTokens.delete(token);
+}
 
 class PlaylistStore {
   constructor(capSeconds) {
@@ -147,8 +421,6 @@ class PlaylistStore {
     };
   }
 }
-
-const playlistStore = new PlaylistStore(config.capSeconds);
 
 const canceledAddTokens = new Map();
 const CANCELED_TOKEN_TTL = 1000 * 60 * 15; // 15 minutes
@@ -469,9 +741,10 @@ function pickThumbnail(meta) {
 }
 
 // ---------- Download & transcode ----------
-async function downloadSourceToTmp(url, formatId, clientArg /* pass-through */) {
+async function downloadSourceToTmp(url, formatId, clientArg /* pass-through */, baseDir = config.tmpDir) {
   requireBinsOrThrow();
-  const outTmpl = path.join(config.tmpDir, "%(title)s-%(id)s.%(ext)s");
+  await ensureDir(baseDir);
+  const outTmpl = path.join(baseDir, `${nanoid(6)}-%(title)s-%(id)s.%(ext)s`);
   const args = [];
   if (formatId) args.push("-f", String(formatId));
   const looksLikePath =
@@ -497,50 +770,63 @@ async function downloadSourceToTmp(url, formatId, clientArg /* pass-through */) 
   return file;
 }
 
-async function transcodeToMp3V0(inputPath) {
+async function transcodeToMp3V0(inputPath, baseDir = config.tmpDir) {
   const id = nanoid(8);
-  const out = path.join(config.tmpDir, `${id}.mp3`);
+  await ensureDir(baseDir);
+  const out = path.join(baseDir, `${id}.mp3`);
   const args = ["-y", "-i", inputPath, "-vn", "-c:a", "libmp3lame", "-q:a", "0", out];
   const { code, stderr } = await run(FF.bin, args);
   if (code !== 0 || !fs.existsSync(out)) throw new Error(`ffmpeg mp3 failed: ${stderr}`);
   return out;
 }
 
-async function transcodeToWav4416(inputPath) {
+async function transcodeToWav4416(inputPath, baseDir = config.tmpDir) {
   const id = nanoid(8);
-  const out = path.join(config.tmpDir, `${id}.wav`);
+  await ensureDir(baseDir);
+  const out = path.join(baseDir, `${id}.wav`);
   const args = ["-y", "-i", inputPath, "-vn", "-ar", "44100", "-ac", "2", "-sample_fmt", "s16", out];
   const { code, stderr } = await run(FF.bin, args);
   if (code !== 0 || !fs.existsSync(out)) throw new Error(`ffmpeg wav failed: ${stderr}`);
   return out;
 }
 
-function encodeContentDisposition(name) {
-  const raw = (name ?? "download").toString();
-  const fallback = raw
-    .replace(/["\\\r\n;%]+/g, "_")
-    .replace(/[^\x20-\x7E]+/g, "_")
-    .trim() || "download";
-  const encoded = encodeURIComponent(raw);
-  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
-}
+async function moveIntoDownloads(tmpPath, desiredName, targetDir = config.downloadDir) {
+  const ext = path.extname(desiredName);
+  const stem = path.basename(desiredName, ext) || "download";
+  const safeStem = safeBase(stem);
+  const safeExt = ext && ext.startsWith(".") ? ext : ext ? `.${ext}` : "";
 
-function streamAndUnlink(res, filePath, downloadName, mimeOverride) {
-  const ext = path.extname(filePath).toLowerCase();
-  let mime = mimeOverride;
-  if (!mime) {
-    if (ext === ".mp3") mime = "audio/mpeg";
-    else if (ext === ".wav") mime = "audio/wav";
-    else if (ext === ".zip") mime = "application/zip";
-    else mime = "application/octet-stream";
+  await ensureDir(targetDir);
+
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    const suffix = attempt === 0 ? "" : ` (${attempt})`;
+    const filename = `${safeStem}${suffix}${safeExt}`;
+    const destPath = path.join(targetDir, filename);
+
+    try {
+      await fsp.access(destPath);
+      continue; // file exists, try next suffix
+    } catch (err) {
+      if (err?.code !== "ENOENT") throw err;
+    }
+
+    try {
+      await fsp.rename(tmpPath, destPath);
+      return { path: destPath, filename };
+    } catch (err) {
+      if (err?.code === "EEXIST") {
+        continue;
+      }
+      if (err?.code === "EXDEV") {
+        await fsp.copyFile(tmpPath, destPath);
+        await fsp.unlink(tmpPath);
+        return { path: destPath, filename };
+      }
+      throw err;
+    }
   }
-  const rs = fs.createReadStream(filePath);
-  res.setHeader("Content-Type", mime);
-  res.setHeader("Content-Disposition", encodeContentDisposition(downloadName));
-  rs.pipe(res);
-  rs.on("close", async () => {
-    try { await fsp.unlink(filePath); } catch {}
-  });
+
+  throw new Error("Failed to allocate download filename");
 }
 
 // --------------------------- Routes ------------------------------
@@ -556,48 +842,88 @@ app.get("/api/diag", async (_req, res) => {
   });
 });
 
-app.get("/api/list", (_req, res) => {
-  res.json(playlistStore.toJSON());
+app.get("/api/list", async (req, res) => {
+  try {
+    const ctx = await getSessionContext(req);
+    res.json(ctx.playlist.toJSON());
+  } catch (err) {
+    console.error("[list] session error:", err?.message || err);
+    res.status(500).json({ error: "Session error" });
+  }
 });
 
-app.post("/api/clear", async (_req, res) => {
-  const cleared = playlistStore.clear();
-  await Promise.allSettled(cleared.map((t) => safeUnlink(t.filepath)));
-  res.json({ ok: true, totalSeconds: playlistStore.totalSeconds });
+app.post("/api/clear", async (req, res) => {
+  try {
+    const ctx = await getSessionContext(req);
+    const cleared = ctx.playlist.clear();
+    await Promise.allSettled(cleared.map((t) => safeUnlink(t?.filepath)));
+    res.json({ ok: true, totalSeconds: ctx.playlist.totalSeconds });
+  } catch (err) {
+    console.error("[clear] session error:", err?.message || err);
+    res.status(500).json({ error: "Session error" });
+  }
 });
 
 app.post("/api/remove/:id", async (req, res) => {
-  const removed = playlistStore.remove(req.params.id);
-  if (!removed) return res.status(404).json({ error: "not found" });
-  await safeUnlink(removed.filepath);
-  res.json({
-    ok: true,
-    totalSeconds: playlistStore.totalSeconds,
-    capSeconds: playlistStore.capSeconds,
-  });
+  try {
+    const ctx = await getSessionContext(req);
+    const removed = ctx.playlist.remove(req.params.id);
+    if (!removed) return res.status(404).json({ error: "not found" });
+    await safeUnlink(removed.filepath);
+    res.json({
+      ok: true,
+      totalSeconds: ctx.playlist.totalSeconds,
+      capSeconds: ctx.playlist.capSeconds,
+    });
+  } catch (err) {
+    console.error("[remove] session error:", err?.message || err);
+    res.status(500).json({ error: "Session error" });
+  }
 });
 
-app.post("/api/reorder", (req, res) => {
+app.post("/api/reorder", async (req, res) => {
   const { order } = req.body || {};
   if (!Array.isArray(order)) {
     return res.status(400).json({ error: "Missing order" });
   }
 
-  const ok = playlistStore.reorder(order);
-  if (!ok) {
-    return res.status(400).json({ error: "Order mismatch" });
+  try {
+    const ctx = await getSessionContext(req);
+    const ok = ctx.playlist.reorder(order);
+    if (!ok) {
+      return res.status(400).json({ error: "Order mismatch" });
+    }
+
+    res.json({ ok: true, totalSeconds: ctx.playlist.totalSeconds, capSeconds: ctx.playlist.capSeconds });
+  } catch (err) {
+    console.error("[reorder] session error:", err?.message || err);
+    res.status(500).json({ error: "Session error" });
+  }
+});
+
+app.get("/api/file/:id", async (req, res) => {
+  try {
+    const ctx = await getSessionContext(req);
+    const item = ctx.playlist.find(req.params.id);
+    if (!item) return res.status(404).end();
+    res.download(item.filepath, path.basename(item.filepath));
+  } catch (err) {
+    console.error("[file] session error:", err?.message || err);
+    res.status(500).end();
+  }
+});
+
+app.post("/api/zip", async (req, res) => {
+  let ctx;
+  try {
+    ctx = await getSessionContext(req);
+  } catch (err) {
+    console.error("[zip] session error:", err?.message || err);
+    return res.status(500).json({ error: "Session error" });
   }
 
-  res.json({ ok: true, totalSeconds: playlistStore.totalSeconds, capSeconds: playlistStore.capSeconds });
-});
+  const playlistStore = ctx.playlist;
 
-app.get("/api/file/:id", (req, res) => {
-  const item = playlistStore.find(req.params.id);
-  if (!item) return res.status(404).end();
-  res.download(item.filepath, path.basename(item.filepath));
-});
-
-app.get("/api/zip", async (_req, res) => {
   if (!playlistStore.items.length) {
     return res.status(400).json({ error: "Playlist is empty" });
   }
@@ -619,7 +945,8 @@ app.get("/api/zip", async (_req, res) => {
     return res.status(400).json({ error: "No files available to zip" });
   }
 
-  const stagingDir = await fsp.mkdtemp(path.join(config.tmpDir, "zip-stage-"));
+  await ensureDir(ctx.scratchDir);
+  const stagingDir = await fsp.mkdtemp(path.join(ctx.scratchDir, "zip-stage-"));
   const stagedFiles = [];
 
   try {
@@ -637,15 +964,32 @@ app.get("/api/zip", async (_req, res) => {
       stagedFiles.push(stagedPath);
     }
 
-    const zipPath = path.join(config.tmpDir, `cd-${nanoid(10)}.zip`);
+    let zipPath = path.join(ctx.scratchDir, `cd-${nanoid(10)}.zip`);
     const args = ["-j", "-q", zipPath, ...stagedFiles];
     const { code, stderr } = await run(ZIP.bin, args);
     if (code !== 0 || !fs.existsSync(zipPath)) {
       throw new Error(stderr || `zip exited with code ${code}`);
     }
 
-    const downloadName = `${safeBase("cd-playlist")}.zip`;
-    streamAndUnlink(res, zipPath, downloadName, "application/zip");
+    let finalInfo = null;
+    try {
+      const downloadName = `${safeBase("cd-playlist")}.zip`;
+      finalInfo = await moveIntoDownloads(zipPath, downloadName, ctx.downloadsDir);
+      zipPath = null;
+    } catch (err) {
+      if (zipPath) await safeUnlink(zipPath);
+      throw err;
+    }
+
+    const stat = await fsp.stat(finalInfo.path).catch(() => null);
+    const token = registerDownloadToken(ctx, finalInfo.path, finalInfo.filename);
+
+    res.json({
+      ok: true,
+      href: `/downloads/${encodeURIComponent(token)}`,
+      filename: finalInfo.filename,
+      sizeBytes: stat?.size ?? null,
+    });
   } catch (err) {
     console.error("[zip] error:", err?.message || err);
     if (!res.headersSent) {
@@ -746,6 +1090,15 @@ app.post("/api/add", async (req, res) => {
   url = canonicalizeYouTube(url);
   if (!url || !/^https?:\/\//i.test(url)) return res.status(400).json({ error: "Invalid URL" });
 
+  let ctx;
+  try {
+    ctx = await getSessionContext(req);
+  } catch (err) {
+    console.error("[add] session error:", err?.message || err);
+    return res.status(500).json({ error: "Session error" });
+  }
+  const playlistStore = ctx.playlist;
+
   const metaR = await getVideoMetaSmart(url);
   if (!metaR.ok || !metaR.meta?.duration) {
     return res.status(400).json({ error: "Failed to read video metadata", detail: metaR.error, stderr: metaR.stderr });
@@ -788,7 +1141,7 @@ app.post("/api/add", async (req, res) => {
       "--no-playlist",
       "--restrict-filenames",
       "-o",
-      path.join(config.downloadDir, "%(title)s-%(id)s.%(ext)s"),
+      path.join(ctx.trackDir, "%(title)s-%(id)s.%(ext)s"),
       "--print",
       "after_move:filepath",
       "--newline",
@@ -854,6 +1207,7 @@ app.post("/api/add", async (req, res) => {
       thumbnail: pickThumbnail(metaR.meta) || null,
     };
     playlistStore.add(item);
+    ctx.lastAccess = Date.now();
     clearCanceledToken(client_token);
     res.json({
       item: {
@@ -879,12 +1233,20 @@ app.post("/api/add", async (req, res) => {
   }
 });
 
-// One-off conversion endpoint (MP3 or WAV) that streams a download
+// One-off conversion endpoint (MP3 or WAV) that prepares a download link
 app.post("/api/convert", async (req, res) => {
   const { url, target, format_id, used_client } = req.body || {};
   if (!url || !/^https?:\/\//i.test(url)) return res.status(400).json({ error: "Invalid URL" });
   const tgt = String(target || "").toLowerCase();
   if (!["mp3", "wav"].includes(tgt)) return res.status(400).json({ error: "Invalid target (mp3|wav)" });
+
+  let ctx;
+  try {
+    ctx = await getSessionContext(req);
+  } catch (err) {
+    console.error("[convert] session error:", err?.message || err);
+    return res.status(500).json({ error: "Session error" });
+  }
 
   let dbgFormats = null, chosenFmt = null, clientArg = null, metaTitle = null;
 
@@ -927,19 +1289,39 @@ app.post("/api/convert", async (req, res) => {
 
     console.log("[convert] target=%s fmtId=%s client=%s url=%s", tgt, fmtId, clientArg || "(default)", url);
 
-    const src = await downloadSourceToTmp(url, fmtId, clientArg);
+    const src = await downloadSourceToTmp(url, fmtId, clientArg, ctx.scratchDir);
 
-    let out;
-    if (tgt === "mp3") {
-      out = await transcodeToMp3V0(src);      // VBR V0 (best from lossy source)
-    } else {
-      out = await transcodeToWav4416(src);    // 44.1kHz/16-bit (CD)
+    let outPath = null;
+    try {
+      if (tgt === "mp3") {
+        outPath = await transcodeToMp3V0(src, ctx.scratchDir);      // VBR V0 (best from lossy source)
+      } else {
+        outPath = await transcodeToWav4416(src, ctx.scratchDir);    // 44.1kHz/16-bit (CD)
+      }
+    } finally {
+      try { await fsp.unlink(src); } catch {}
     }
-    try { await fsp.unlink(src); } catch {}
 
-    const base = safeBase(metaTitle);
-    const downloadName = `${base}.${tgt}`;
-    streamAndUnlink(res, out, downloadName);
+    let finalInfo = null;
+    try {
+      const base = safeBase(metaTitle);
+      const downloadName = `${base}.${tgt}`;
+      finalInfo = await moveIntoDownloads(outPath, downloadName, ctx.downloadsDir);
+      outPath = null;
+    } catch (err) {
+      if (outPath) await safeUnlink(outPath);
+      throw err;
+    }
+
+    const stat = await fsp.stat(finalInfo.path).catch(() => null);
+    const token = registerDownloadToken(ctx, finalInfo.path, finalInfo.filename);
+
+    res.json({
+      ok: true,
+      href: `/downloads/${encodeURIComponent(token)}`,
+      filename: finalInfo.filename,
+      sizeBytes: stat?.size ?? null,
+    });
 
   } catch (e) {
     console.error("[convert] error:", e?.message || e);
