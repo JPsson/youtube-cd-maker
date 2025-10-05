@@ -29,6 +29,7 @@ const dom = {
 const state = {
   server: { capSeconds: 80 * 60, totalSeconds: 0, items: [] },
   optimisticAdds: [],
+  nextOrderHint: 1,
 };
 
 let sessionHint = null;
@@ -43,9 +44,44 @@ let lastDisclaimerTrigger = null;
 const probeCache = new Map(); // key -> { fast, smart, pendingFast, pendingSmart, ts }
 
 function orderValueOf(item) {
-  const raw = item && (item.order ?? item.ordinal ?? item.sequence ?? item.seq ?? null);
-  const num = Number(raw);
-  return Number.isFinite(num) ? num : Infinity;
+  if (!item) return Infinity;
+  const candidates = [
+    item.orderHint,
+    item.order,
+    item.ordinal,
+    item.sequence,
+    item.seq,
+  ];
+  for (const raw of candidates) {
+    const num = Number(raw);
+    if (Number.isFinite(num)) return num;
+  }
+  return Infinity;
+}
+
+function registerOrderCursor(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return;
+  state.nextOrderHint = Math.max(state.nextOrderHint, Math.floor(num) + 1);
+}
+
+function updateOrderCursorFromServerItems(items) {
+  if (!Array.isArray(items) || !items.length) {
+    state.nextOrderHint = Math.max(state.nextOrderHint, 1);
+    return;
+  }
+  let maxOrder = -Infinity;
+  for (const item of items) {
+    const val = orderValueOf(item);
+    if (Number.isFinite(val) && val > maxOrder) {
+      maxOrder = val;
+    }
+  }
+  if (Number.isFinite(maxOrder)) {
+    registerOrderCursor(maxOrder);
+  } else {
+    state.nextOrderHint = Math.max(state.nextOrderHint, items.length + 1);
+  }
 }
 
 function insertServerItemOrdered(items, item) {
@@ -55,6 +91,7 @@ function insertServerItemOrdered(items, item) {
     items.push(item);
     return;
   }
+  registerOrderCursor(targetOrder);
   const existingIdx = items.findIndex((entry) => orderValueOf(entry) > targetOrder);
   if (existingIdx === -1) {
     items.push(item);
@@ -351,17 +388,47 @@ class PlaylistRenderer {
 
     const frag = document.createDocumentFragment();
     const serverItems = Array.isArray(server.items) ? server.items : [];
+    const optimisticItems = Array.isArray(optimistic) ? optimistic : [];
 
+    const combined = [];
     serverItems.forEach((item, idx) => {
-      frag.appendChild(this.createServerRow(item, idx + 1));
+      combined.push({
+        kind: "server",
+        item,
+        order: orderValueOf(item),
+        createdAt: idx,
+        tie: idx,
+      });
     });
 
-    optimistic.forEach((item, idx) => {
-      frag.appendChild(this.createOptimisticRow(item, serverItems.length + idx + 1));
+    optimisticItems.forEach((item, idx) => {
+      combined.push({
+        kind: "optimistic",
+        item,
+        order: orderValueOf(item),
+        createdAt: item?.createdAt || 0,
+        tie: serverItems.length + idx,
+      });
+    });
+
+    combined.sort((a, b) => {
+      const ao = Number.isFinite(a.order) ? a.order : Infinity;
+      const bo = Number.isFinite(b.order) ? b.order : Infinity;
+      if (ao !== bo) return ao - bo;
+      if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+      return a.tie - b.tie;
+    });
+
+    combined.forEach((entry, idx) => {
+      if (entry.kind === "server") {
+        frag.appendChild(this.createServerRow(entry.item, idx + 1));
+      } else {
+        frag.appendChild(this.createOptimisticRow(entry.item, idx + 1));
+      }
     });
 
     this.body.replaceChildren(frag);
-    this.renderGauge(server, optimistic);
+    this.renderGauge(server, optimisticItems);
   }
 
   createServerRow(item, index) {
@@ -687,6 +754,7 @@ async function refresh() {
   };
 
   if (!Array.isArray(state.server.items)) state.server.items = [];
+  updateOrderCursorFromServerItems(state.server.items);
   syncUI();
   return state.server;
 }
@@ -828,7 +896,14 @@ async function handleAddToCd() {
 
   hideThumb();
   const token = makeToken();
-  const optimistic = { token, title: "Loading…", duration: 0 };
+  const orderHint = state.nextOrderHint++;
+  const optimistic = {
+    token,
+    title: "Loading…",
+    duration: 0,
+    orderHint,
+    createdAt: Date.now(),
+  };
   state.optimisticAdds.push(optimistic);
   syncUI();
 
@@ -1189,6 +1264,7 @@ async function handleClear() {
   if (!confirm("Clear the whole list and delete files?")) return;
   state.optimisticAdds.length = 0;
   optimisticLoadingIndicators.forEach((_, token) => stopOptimisticLoading(token));
+  state.nextOrderHint = 1;
   await sessionFetch("/api/clear", { method: "POST" });
   await refresh();
 }
@@ -1215,6 +1291,7 @@ function applyOrderToState(order) {
     if (entry) entry.order = base + idx;
   });
   state.server.items = order.map((id) => map.get(id));
+  updateOrderCursorFromServerItems(state.server.items);
   return true;
 }
 
