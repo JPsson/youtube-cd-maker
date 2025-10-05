@@ -291,7 +291,12 @@ async function serveDownload(req, res, { head = false } = {}) {
   }
 
   if (!req.sessionId || req.sessionId !== entry.sessionId) {
-    return res.status(403).json({ error: "Unauthorized" });
+    req.sessionId = entry.sessionId;
+    try {
+      setCookie(res, buildSessionCookie(entry.sessionId));
+    } catch (err) {
+      console.warn("[downloads] failed to rebind session cookie:", err?.message || err);
+    }
   }
 
   let stat;
@@ -323,7 +328,10 @@ async function serveDownload(req, res, { head = false } = {}) {
   }
 
   return res.download(entry.path, entry.filename, (err) => {
-    if (!err) return;
+    if (!err) {
+      dropDownloadToken(token, entry);
+      return;
+    }
     if (err?.code === "ENOENT") {
       dropDownloadToken(token, entry);
       if (!res.headersSent) res.status(404).json({ error: "File not found" });
