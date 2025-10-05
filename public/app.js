@@ -31,6 +31,8 @@ const state = {
   optimisticAdds: [],
 };
 
+let sessionHint = null;
+
 const THEME_STORAGE_KEY = "cd-maker-theme";
 
 const pendingAddRequests = new Map();
@@ -599,8 +601,32 @@ function syncUI() {
   updateActionButtons();
 }
 
+function buildSessionHeaders(headers) {
+  const merged = new Headers(headers || {});
+  if (sessionHint && !merged.has("X-CD-Session")) {
+    merged.set("X-CD-Session", sessionHint);
+  }
+  return merged;
+}
+
+async function sessionFetch(input, init = {}) {
+  const opts = { ...init };
+  opts.credentials = init.credentials || "same-origin";
+  opts.headers = buildSessionHeaders(init.headers);
+  const response = await fetch(input, opts);
+  try {
+    const hinted = response?.headers?.get?.("x-cd-session");
+    if (hinted) {
+      sessionHint = hinted;
+    }
+  } catch (err) {
+    // ignore header access issues
+  }
+  return response;
+}
+
 async function refresh() {
-  const r = await fetch("/api/list");
+  const r = await sessionFetch("/api/list");
   state.server = await r.json();
   if (!Array.isArray(state.server.items)) state.server.items = [];
   syncUI();
@@ -674,7 +700,7 @@ function removeOptimisticEntry(token, { silent = false } = {}) {
 }
 
 async function probe(url, { fast = false } = {}) {
-  const r = await fetch("/api/probe", {
+  const r = await sessionFetch("/api/probe", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url, fast }),
@@ -787,7 +813,7 @@ async function handleAddToCd() {
         }
       : { url, client_token: token, used_client: usedClient || null };
 
-    const r = await fetch("/api/add", {
+    const r = await sessionFetch("/api/add", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -923,7 +949,7 @@ async function oneOffDownload(target) {
       used_client: cached?.usedClient || null,
     };
 
-    const r = await fetch("/api/convert", {
+    const r = await sessionFetch("/api/convert", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -1017,7 +1043,7 @@ async function handleZipDownload() {
   dotsAnimator.start();
 
   try {
-    const r = await fetch("/api/zip", { method: "POST" });
+    const r = await sessionFetch("/api/zip", { method: "POST" });
     if (!r.ok) {
       const txt = await r.text();
       setPickedNoteError(`Failed to create ZIP: ${txt || r.statusText}`);
@@ -1055,7 +1081,7 @@ async function handleRemove(id) {
   }
 
   try {
-    const res = await fetch(`/api/remove/${id}`, { method: "POST" });
+    const res = await sessionFetch(`/api/remove/${id}`, { method: "POST" });
     if (!res.ok) {
       if (res.status === 404) {
         await refresh();
@@ -1085,7 +1111,7 @@ function handleCancel(token) {
   const controller = pendingAddRequests.get(token);
   if (controller) controller.abort();
   removeOptimisticEntry(token);
-  fetch("/api/cancel-add", {
+  sessionFetch("/api/cancel-add", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ token }),
@@ -1097,7 +1123,7 @@ async function handleClear() {
   if (!confirm("Clear the whole list and delete files?")) return;
   state.optimisticAdds.length = 0;
   optimisticLoadingIndicators.forEach((_, token) => stopOptimisticLoading(token));
-  await fetch("/api/clear", { method: "POST" });
+  await sessionFetch("/api/clear", { method: "POST" });
   await refresh();
 }
 
@@ -1231,7 +1257,7 @@ function initReorderDrag() {
 
     syncUI();
 
-    fetch("/api/reorder", {
+    sessionFetch("/api/reorder", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ order: newOrder }),
