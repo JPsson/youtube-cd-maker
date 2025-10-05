@@ -34,6 +34,7 @@ const state = {
 
 let sessionHint = null;
 let refreshRequestId = 0;
+let activeConversionOverlayToken = 0;
 
 const THEME_STORAGE_KEY = "cd-maker-theme";
 
@@ -507,9 +508,7 @@ class PlaylistRenderer {
     srText.textContent = "Loading";
     const pctText = document.createElement("span");
     pctText.className = "optimisticProgressText";
-    pctText.textContent = typeof item?.progress === "number"
-      ? `${Math.round(item.progress)}%`
-      : "Loading";
+    pctText.textContent = item?.status === "queued" ? "Queued" : "";
     status.append(spinner, srText, pctText);
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "action danger";
@@ -788,15 +787,15 @@ function ensureOptimisticLoadingIndicator(token, el) {
     const srText = document.createElement("span");
     srText.className = "srOnly";
     srText.textContent = "Loading";
-    const pctText = document.createElement("span");
-    pctText.className = "optimisticProgressText";
-    pctText.textContent = "Loading";
-    el.append(spinner, srText, pctText);
+    const statusText = document.createElement("span");
+    statusText.className = "optimisticProgressText";
+    statusText.textContent = "";
+    el.append(spinner, srText, statusText);
   } else if (!el.querySelector(".optimisticProgressText")) {
-    const pctText = document.createElement("span");
-    pctText.className = "optimisticProgressText";
-    pctText.textContent = "Loading";
-    el.appendChild(pctText);
+    const statusText = document.createElement("span");
+    statusText.className = "optimisticProgressText";
+    statusText.textContent = "";
+    el.appendChild(statusText);
   }
   el.setAttribute("role", "status");
   el.setAttribute("aria-live", "polite");
@@ -813,7 +812,7 @@ function updateOptimisticStatusDisplay(entry) {
   ensureOptimisticLoadingIndicator(entry.token, status);
   const spinner = status.querySelector(".optimisticSpinner");
   const textNode = status.querySelector(".optimisticProgressText");
-  let label = "Loading";
+  let label = "";
   let busy = true;
 
   let tooltip = "";
@@ -828,20 +827,18 @@ function updateOptimisticStatusDisplay(entry) {
   } else if (entry.status === "success" && entry.done) {
     label = "Finalizing…";
     busy = false;
-  } else if (typeof entry.progress === "number") {
-    label = `${Math.round(entry.progress)}%`;
   } else if (entry.status === "queued") {
     label = "Queued";
   }
 
   if (textNode) {
-    textNode.textContent = label;
+    textNode.textContent = label || "";
   }
   if (spinner) {
     spinner.style.display = busy ? "inline-block" : "none";
   }
   status.setAttribute("aria-busy", busy ? "true" : "false");
-  status.setAttribute("aria-label", label);
+  status.setAttribute("aria-label", label || "Loading");
   if (tooltip) {
     status.title = tooltip;
   } else {
@@ -1002,29 +999,60 @@ async function ensureBackgroundProbe(url) {
 
   if (!entry.fast && !entry.pendingFast) {
     entry.pendingFast = true;
-    probe(url, { fast: true })
+    const fastPromise = probe(url, { fast: true })
       .then((d) => {
         entry.fast = d;
+        entry.usedClient = d?.usedClient || entry.usedClient || null;
         entry.pendingFast = false;
+        entry.fastPromise = null;
         entry.ts = Date.now();
+        return d;
       })
-      .catch(() => {
+      .catch((err) => {
         entry.pendingFast = false;
+        entry.fastPromise = null;
+        throw err;
       });
+    entry.fastPromise = fastPromise;
+    fastPromise.catch(() => {});
   }
 
   if (!entry.smart && !entry.pendingSmart) {
     entry.pendingSmart = true;
-    probe(url, { fast: false })
+    const smartPromise = probe(url, { fast: false })
       .then((d) => {
         entry.smart = d;
+        entry.usedClient = d?.usedClient || entry.usedClient || null;
         entry.pendingSmart = false;
+        entry.smartPromise = null;
         entry.ts = Date.now();
+        return d;
       })
-      .catch(() => {
+      .catch((err) => {
         entry.pendingSmart = false;
+        entry.smartPromise = null;
+        throw err;
       });
+    entry.smartPromise = smartPromise;
+    smartPromise.catch(() => {});
   }
+}
+
+function waitForProbeFast(url) {
+  const key = keyFor(url);
+  if (!key) return Promise.resolve(null);
+  let entry = probeCache.get(key);
+  if (entry?.fast) return Promise.resolve(entry.fast);
+  if (entry?.fastPromise) {
+    return entry.fastPromise.then((data) => data).catch(() => null);
+  }
+  ensureBackgroundProbe(url);
+  entry = probeCache.get(key);
+  if (entry?.fast) return Promise.resolve(entry.fast);
+  if (entry?.fastPromise) {
+    return entry.fastPromise.then((data) => data).catch(() => null);
+  }
+  return Promise.resolve(null);
 }
 
 function bestCachedData(url) {
@@ -1225,6 +1253,13 @@ async function oneOffDownload(target) {
 
   const ytId = youTubeIdFrom(url);
   const thumbSrc = ytId ? `/thumb/${ytId}?t=${Date.now()}` : null;
+  const overlayToken = ++activeConversionOverlayToken;
+  const applyFormatSubtitle = (format) => {
+    if (!format) return;
+    if (activeConversionOverlayToken !== overlayToken) return;
+    if (overlay?.root?.hidden) return;
+    overlay.setSubtitle(describeFormat(format));
+  };
   overlay.showConversion({
     title: `Preparing your ${target.toUpperCase()}`,
     subtitle: "",
@@ -1234,12 +1269,22 @@ async function oneOffDownload(target) {
 
   const cached = bestCachedData(url);
   let bestFormat = cached?.bestFormat || null;
-
+  
   if (bestFormat) {
-    overlay.setSubtitle(describeFormat(bestFormat));
+    applyFormatSubtitle(bestFormat);
   }
 
   if (!cached) ensureBackgroundProbe(url);
+
+  if (!bestFormat) {
+    waitForProbeFast(url).then((data) => {
+      if (!data) return;
+      if (!bestFormat && data.bestFormat) {
+        bestFormat = data.bestFormat;
+      }
+      applyFormatSubtitle(data.bestFormat || bestFormat || null);
+    });
+  }
 
   try {
     const body = {
