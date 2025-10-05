@@ -111,7 +111,7 @@ async function createSessionContext(sessionId) {
     ensureDir(downloadsDir),
   ]);
 
-  return {
+  const ctx = {
     id: sessionId,
     key,
     playlist: new PlaylistStore(config.capSeconds),
@@ -121,6 +121,15 @@ async function createSessionContext(sessionId) {
     downloadTokens: new Set(),
     lastAccess: Date.now(),
   };
+
+  console.log("[session] context created", {
+    sessionId,
+    trackDir,
+    scratchDir,
+    downloadsDir,
+  });
+
+  return ctx;
 }
 
 async function getSessionContext(req) {
@@ -154,6 +163,8 @@ async function destroySessionContext(sessionId) {
   sessionContexts.delete(sessionId);
   sessionCreationPromises.delete(sessionId);
 
+  console.log("[session] destroying context", { sessionId, key: ctx.key });
+
   for (const token of ctx.downloadTokens) {
     dropDownloadToken(token, downloadTokenIndex.get(token));
   }
@@ -174,6 +185,7 @@ function purgeDownloadTokens() {
   const now = Date.now();
   for (const [token, entry] of downloadTokenIndex) {
     if (!entry || entry.expiresAt <= now) {
+      console.log("[downloads] expiring token", token);
       dropDownloadToken(token, entry);
     }
   }
@@ -184,6 +196,7 @@ async function purgeStaleSessions() {
   const sweeps = [];
   for (const [sid, ctx] of sessionContexts) {
     if (!ctx || ctx.lastAccess + SESSION_COOKIE_MAX_AGE <= now) {
+      console.log("[session] sweeping idle session", sid);
       sweeps.push(destroySessionContext(sid));
     }
   }
@@ -204,6 +217,7 @@ function sessionCookieMiddleware(req, res, next) {
   let sid = sanitizeSessionId(cookies[SESSION_COOKIE_NAME]);
   if (!sid) {
     sid = nanoid(24);
+    console.log("[session] issued new session id", sid);
   }
   req.sessionId = sid;
   try {
@@ -290,6 +304,12 @@ async function serveDownload(req, res, { head = false } = {}) {
     return res.status(404).json({ error: "Download expired" });
   }
 
+  console.log("[downloads] %s request", head ? "HEAD" : "GET", {
+    token,
+    sessionId: entry.sessionId,
+    filename: entry.filename,
+  });
+
   if (!req.sessionId || req.sessionId !== entry.sessionId) {
     req.sessionId = entry.sessionId;
     try {
@@ -324,11 +344,13 @@ async function serveDownload(req, res, { head = false } = {}) {
     res.setHeader("Content-Length", stat.size);
     res.setHeader("Content-Type", "application/octet-stream");
     res.setHeader("Content-Disposition", `attachment; filename="${entry.filename}"`);
+    console.log("[downloads] responded to HEAD", { token, size: stat.size });
     return res.status(200).end();
   }
 
   return res.download(entry.path, entry.filename, (err) => {
     if (!err) {
+      console.log("[downloads] completed transfer", { token, filename: entry.filename });
       dropDownloadToken(token, entry);
       return;
     }
@@ -358,6 +380,7 @@ function registerDownloadToken(ctx, filePath, filename) {
   });
   ctx.downloadTokens.add(token);
   ctx.lastAccess = Date.now();
+  console.log("[downloads] token issued", { token, sessionId: ctx.id, filename });
   return token;
 }
 
@@ -366,6 +389,7 @@ function dropDownloadToken(token, entry) {
   if (!entry) return;
   const ctx = entry.sessionId ? sessionContexts.get(entry.sessionId) : null;
   ctx?.downloadTokens.delete(token);
+  console.log("[downloads] token dropped", { token, sessionId: entry?.sessionId, filename: entry?.filename });
 }
 
 class PlaylistStore {
@@ -483,10 +507,15 @@ function setAddProgress(token, value, { done = false } = {}) {
   const nextValue = !done && prev && typeof prev.value === "number"
     ? Math.max(prev.value, clamped)
     : clamped;
+  const prevLogged = prev?.loggedValue ?? prev?.value ?? null;
+  if (prevLogged === null || done !== prev?.done || Math.abs(nextValue - prevLogged) >= 5) {
+    console.log("[add] progress", { token, value: nextValue, done });
+  }
   addProgressMap.set(token, {
     value: nextValue,
     done: Boolean(done),
     expiresAt: Date.now() + (done ? ADD_PROGRESS_DONE_TTL : ADD_PROGRESS_ACTIVE_TTL),
+    loggedValue: nextValue,
   });
 }
 
@@ -853,6 +882,7 @@ app.get("/api/diag", async (_req, res) => {
 app.get("/api/list", async (req, res) => {
   try {
     const ctx = await getSessionContext(req);
+    console.log("[playlist] list", { sessionId: ctx.id, count: ctx.playlist.items.length });
     res.json(ctx.playlist.toJSON());
   } catch (err) {
     console.error("[list] session error:", err?.message || err);
@@ -865,6 +895,7 @@ app.post("/api/clear", async (req, res) => {
     const ctx = await getSessionContext(req);
     const cleared = ctx.playlist.clear();
     await Promise.allSettled(cleared.map((t) => safeUnlink(t?.filepath)));
+    console.log("[playlist] cleared", { sessionId: ctx.id, removed: cleared.length });
     res.json({ ok: true, totalSeconds: ctx.playlist.totalSeconds });
   } catch (err) {
     console.error("[clear] session error:", err?.message || err);
@@ -878,6 +909,7 @@ app.post("/api/remove/:id", async (req, res) => {
     const removed = ctx.playlist.remove(req.params.id);
     if (!removed) return res.status(404).json({ error: "not found" });
     await safeUnlink(removed.filepath);
+    console.log("[playlist] removed", { sessionId: ctx.id, itemId: removed.id, title: removed.title });
     res.json({
       ok: true,
       totalSeconds: ctx.playlist.totalSeconds,
@@ -902,6 +934,7 @@ app.post("/api/reorder", async (req, res) => {
       return res.status(400).json({ error: "Order mismatch" });
     }
 
+    console.log("[playlist] reordered", { sessionId: ctx.id, order });
     res.json({ ok: true, totalSeconds: ctx.playlist.totalSeconds, capSeconds: ctx.playlist.capSeconds });
   } catch (err) {
     console.error("[reorder] session error:", err?.message || err);
@@ -914,6 +947,7 @@ app.get("/api/file/:id", async (req, res) => {
     const ctx = await getSessionContext(req);
     const item = ctx.playlist.find(req.params.id);
     if (!item) return res.status(404).end();
+    console.log("[playlist] file download", { sessionId: ctx.id, itemId: item.id, title: item.title });
     res.download(item.filepath, path.basename(item.filepath));
   } catch (err) {
     console.error("[file] session error:", err?.message || err);
@@ -953,6 +987,7 @@ app.post("/api/zip", async (req, res) => {
     return res.status(400).json({ error: "No files available to zip" });
   }
 
+  console.log("[zip] preparing", { sessionId: ctx.id, entries: entries.length });
   await ensureDir(ctx.scratchDir);
   const stagingDir = await fsp.mkdtemp(path.join(ctx.scratchDir, "zip-stage-"));
   const stagedFiles = [];
@@ -992,6 +1027,13 @@ app.post("/api/zip", async (req, res) => {
     const stat = await fsp.stat(finalInfo.path).catch(() => null);
     const token = registerDownloadToken(ctx, finalInfo.path, finalInfo.filename);
 
+    console.log("[zip] ready", {
+      sessionId: ctx.id,
+      filename: finalInfo.filename,
+      sizeBytes: stat?.size ?? null,
+      token,
+    });
+
     res.json({
       ok: true,
       href: `/downloads/${encodeURIComponent(token)}`,
@@ -1018,6 +1060,7 @@ app.post("/api/probe", async (req, res) => {
   let { url, fast } = req.body || {};
   url = canonicalizeYouTube(url);
   if (!url || !/^https?:\/\//i.test(url)) return res.status(400).json({ error: "Invalid URL" });
+  console.log("[probe] requested", { url, fast: Boolean(fast) });
   try {
     const r = fast
       ? await getVideoMetaDetailed(url, "youtube:player_client=web")
@@ -1061,6 +1104,7 @@ app.post("/api/cancel-add", (req, res) => {
   if (!token || typeof token !== "string") {
     return res.status(400).json({ error: "Missing token" });
   }
+  console.log("[add] cancel requested", { token });
   markAddCanceled(token);
   res.status(204).end();
 });
@@ -1106,6 +1150,14 @@ app.post("/api/add", async (req, res) => {
     return res.status(500).json({ error: "Session error" });
   }
   const playlistStore = ctx.playlist;
+
+  console.log("[add] requested", {
+    sessionId: ctx.id,
+    url,
+    quality: quality || null,
+    formatId: format_id || null,
+    clientToken: client_token || null,
+  });
 
   const metaR = await getVideoMetaSmart(url);
   if (!metaR.ok || !metaR.meta?.duration) {
@@ -1217,6 +1269,13 @@ app.post("/api/add", async (req, res) => {
     playlistStore.add(item);
     ctx.lastAccess = Date.now();
     clearCanceledToken(client_token);
+    console.log("[add] completed", {
+      sessionId: ctx.id,
+      itemId: item.id,
+      title: item.title,
+      duration: item.duration,
+      sizeBytes: item.sizeBytes,
+    });
     res.json({
       item: {
         id: item.id,
@@ -1255,6 +1314,13 @@ app.post("/api/convert", async (req, res) => {
     console.error("[convert] session error:", err?.message || err);
     return res.status(500).json({ error: "Session error" });
   }
+
+  console.log("[convert] requested", {
+    sessionId: ctx.id,
+    url,
+    target: tgt,
+    formatId: format_id || null,
+  });
 
   let dbgFormats = null, chosenFmt = null, clientArg = null, metaTitle = null;
 
@@ -1298,6 +1364,7 @@ app.post("/api/convert", async (req, res) => {
     console.log("[convert] target=%s fmtId=%s client=%s url=%s", tgt, fmtId, clientArg || "(default)", url);
 
     const src = await downloadSourceToTmp(url, fmtId, clientArg, ctx.scratchDir);
+    console.log("[convert] downloaded source", { sessionId: ctx.id, target: tgt, src });
 
     let outPath = null;
     try {
@@ -1323,6 +1390,12 @@ app.post("/api/convert", async (req, res) => {
 
     const stat = await fsp.stat(finalInfo.path).catch(() => null);
     const token = registerDownloadToken(ctx, finalInfo.path, finalInfo.filename);
+    console.log("[convert] ready", {
+      sessionId: ctx.id,
+      filename: finalInfo.filename,
+      sizeBytes: stat?.size ?? null,
+      token,
+    });
 
     res.json({
       ok: true,
