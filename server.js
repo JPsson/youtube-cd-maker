@@ -54,8 +54,14 @@ await fsp.mkdir(config.downloadDir, { recursive: true });
 await fsp.mkdir(config.tmpDir, { recursive: true });
 
 const SESSION_COOKIE_NAME = "cd_sid";
-const SESSION_COOKIE_MAX_AGE = Math.max(60_000, config.sessionIdleTtlMs);
+const SESSION_IDLE_MIN_MS = 1000 * 60 * 5; // keep sessions alive for at least 5 minutes
+const SESSION_COOKIE_MAX_AGE = Math.max(SESSION_IDLE_MIN_MS, config.sessionIdleTtlMs);
 const DOWNLOAD_TOKEN_TTL = Math.max(60_000, config.downloadTokenTtlMs);
+
+console.log("[session] idle ttl configured", {
+  requestedMs: config.sessionIdleTtlMs,
+  effectiveMs: SESSION_COOKIE_MAX_AGE,
+});
 
 const sessionContexts = new Map(); // sid -> context
 const sessionCreationPromises = new Map(); // sid -> promise
@@ -819,9 +825,12 @@ function formatZipEntryName(title, index, total, ext) {
   return `${prefix} ${cleanTitle}${cleanExt}`;
 }
 
-function updateProgressFromYtDlp(token, chunk) {
+function updateProgressFromYtDlp(token, chunk, ctx) {
   if (!token || !chunk) return;
   const text = chunk.toString();
+  if (ctx && typeof ctx === "object") {
+    ctx.lastAccess = Date.now();
+  }
   const matches = text.match(/\[download\]\s+([\d.]+)%/g);
   if (matches && matches.length) {
     const last = matches[matches.length - 1];
@@ -1400,9 +1409,16 @@ app.post("/api/add", async (req, res) => {
       return { status: "canceled" };
     }
 
+    ctx.lastAccess = Date.now();
+
     const q = (quality || "").toLowerCase();
     const audioQuality = (q === "320" || q === "320k") ? "320K" : "0"; // default V0
     const args = [];
+    const keepAliveEvery = Math.max(30_000, Math.min(Math.floor(SESSION_COOKIE_MAX_AGE / 2), 120_000));
+    const keepAliveTimer = setInterval(() => {
+      ctx.lastAccess = Date.now();
+    }, keepAliveEvery);
+    keepAliveTimer.unref?.();
 
     const clientArg = metaR.usedClient || used_client || "";
     if (clientArg && clientArg.trim()) args.push("--extractor-args", clientArg);
@@ -1440,13 +1456,13 @@ app.post("/api/add", async (req, res) => {
       proc.stdout?.on("data", (chunk) => {
         const text = chunk.toString();
         stdout += text;
-        if (client_token) updateProgressFromYtDlp(client_token, text);
+        if (client_token) updateProgressFromYtDlp(client_token, text, ctx);
       });
 
       proc.stderr?.on("data", (chunk) => {
         const text = chunk.toString();
         stderr += text;
-        if (client_token) updateProgressFromYtDlp(client_token, text);
+        if (client_token) updateProgressFromYtDlp(client_token, text, ctx);
       });
 
       const code = await new Promise((resolve) => {
@@ -1523,6 +1539,8 @@ app.post("/api/add", async (req, res) => {
     } catch (err) {
       if (filePath) await safeUnlink(filePath);
       throw err;
+    } finally {
+      clearInterval(keepAliveTimer);
     }
   };
 
