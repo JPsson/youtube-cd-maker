@@ -56,7 +56,7 @@ await fsp.mkdir(config.tmpDir, { recursive: true });
 const SESSION_COOKIE_NAME = "cd_sid";
 const SESSION_IDLE_MIN_MS = 1000 * 60 * 5; // keep sessions alive for at least 5 minutes
 const SESSION_COOKIE_MAX_AGE = Math.max(SESSION_IDLE_MIN_MS, config.sessionIdleTtlMs);
-const DOWNLOAD_TOKEN_TTL = Math.max(60_000, config.downloadTokenTtlMs);
+const DOWNLOAD_TOKEN_TTL = Math.max(600_000, config.downloadTokenTtlMs);
 
 console.log("[session] idle ttl configured", {
   requestedMs: config.sessionIdleTtlMs,
