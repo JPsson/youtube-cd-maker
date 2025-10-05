@@ -42,6 +42,27 @@ let lastDisclaimerTrigger = null;
 
 const probeCache = new Map(); // key -> { fast, smart, pendingFast, pendingSmart, ts }
 
+function orderValueOf(item) {
+  const raw = item && (item.order ?? item.ordinal ?? item.sequence ?? item.seq ?? null);
+  const num = Number(raw);
+  return Number.isFinite(num) ? num : Infinity;
+}
+
+function insertServerItemOrdered(items, item) {
+  if (!item) return;
+  const targetOrder = orderValueOf(item);
+  if (!Number.isFinite(targetOrder)) {
+    items.push(item);
+    return;
+  }
+  const existingIdx = items.findIndex((entry) => orderValueOf(entry) > targetOrder);
+  if (existingIdx === -1) {
+    items.push(item);
+  } else {
+    items.splice(existingIdx, 0, item);
+  }
+}
+
 const prefersDarkScheme =
   typeof window !== "undefined" && typeof window.matchMedia === "function"
     ? window.matchMedia("(prefers-color-scheme: dark)")
@@ -635,7 +656,17 @@ async function refresh() {
   }
 
   const next = await r.json();
-  const nextItems = Array.isArray(next?.items) ? next.items : [];
+  const nextItems = Array.isArray(next?.items) ? next.items.slice() : [];
+  nextItems.sort((a, b) => {
+    const oa = orderValueOf(a);
+    const ob = orderValueOf(b);
+    const aFinite = Number.isFinite(oa);
+    const bFinite = Number.isFinite(ob);
+    if (aFinite && bFinite) return oa - ob;
+    if (aFinite) return -1;
+    if (bFinite) return 1;
+    return 0;
+  });
   const currentItems = Array.isArray(state.server.items) ? state.server.items : [];
   const hasPendingAdds = state.optimisticAdds.length > 0 || pendingAddRequests.size > 0;
 
@@ -862,11 +893,12 @@ async function handleAddToCd() {
     if (resBody?.item) {
       if (!Array.isArray(state.server.items)) state.server.items = [];
       const items = state.server.items;
-      const existingIdx = items.findIndex((entry) => entry?.id === resBody.item.id);
+      const incoming = resBody.item;
+      const existingIdx = items.findIndex((entry) => entry?.id === incoming.id);
       if (existingIdx !== -1) {
         items.splice(existingIdx, 1);
       }
-      items.push(resBody.item);
+      insertServerItemOrdered(items, incoming);
       if (typeof resBody.totalSeconds === "number") {
         state.server.totalSeconds = resBody.totalSeconds;
       }
@@ -1174,6 +1206,14 @@ function applyOrderToState(order) {
   if (order.length !== items.length) return false;
   const map = new Map(items.map((item) => [item.id, item]));
   if (order.some((id) => !map.has(id))) return false;
+  const currentOrders = items
+    .map((item) => orderValueOf(item))
+    .filter((value) => Number.isFinite(value));
+  const base = currentOrders.length ? Math.max(...currentOrders) + 1 : 1;
+  order.forEach((id, idx) => {
+    const entry = map.get(id);
+    if (entry) entry.order = base + idx;
+  });
   state.server.items = order.map((id) => map.get(id));
   return true;
 }

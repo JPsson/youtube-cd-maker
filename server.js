@@ -47,6 +47,7 @@ console.log("[add] worker pool configured", {
   parallelism: config.addParallelism,
   cpuCount,
   source: normalizedEnvAddParallelism ? "env" : "auto",
+  scope: "per-session",
 });
 
 await fsp.mkdir(config.downloadDir, { recursive: true });
@@ -140,7 +141,6 @@ class ParallelWorkQueue {
   }
 }
 
-const addQueue = new ParallelWorkQueue(config.addParallelism, { name: "add-workers" });
 
 function parseCookies(header) {
   const out = Object.create(null);
@@ -222,6 +222,9 @@ async function createSessionContext(sessionId) {
     id: sessionId,
     key,
     playlist: new PlaylistStore(config.capSeconds),
+    addQueue: new ParallelWorkQueue(config.addParallelism, {
+      name: `add-workers:${sessionId.slice(0, 8)}`,
+    }),
     trackDir,
     scratchDir,
     downloadsDir,
@@ -537,14 +540,30 @@ class PlaylistStore {
   constructor(capSeconds) {
     this.capSeconds = capSeconds;
     this.items = [];
+    this.nextSeq = 1;
   }
 
   get totalSeconds() {
     return this.items.reduce((acc, t) => acc + (t.duration || 0), 0);
   }
 
-  add(item) {
-    this.items.push(item);
+  issueSeq() {
+    const seq = this.nextSeq;
+    this.nextSeq += 1;
+    return seq;
+  }
+
+  add(item, seq) {
+    const orderSeq = Number.isFinite(seq) ? seq : this.issueSeq();
+    const entry = { ...item, orderSeq };
+    const insertIdx = this.items.findIndex((t) => Number(t?.orderSeq ?? Infinity) > orderSeq);
+    if (insertIdx === -1) {
+      this.items.push(entry);
+    } else {
+      this.items.splice(insertIdx, 0, entry);
+    }
+    this.nextSeq = Math.max(this.nextSeq, orderSeq + 1);
+    return entry;
   }
 
   remove(id) {
@@ -557,6 +576,7 @@ class PlaylistStore {
   clear() {
     const cleared = this.items.slice();
     this.items.length = 0;
+    this.nextSeq = 1;
     return cleared;
   }
 
@@ -574,7 +594,13 @@ class PlaylistStore {
     const map = new Map(this.items.map((item) => [item.id, item]));
     if (orderIds.some((id) => !map.has(id))) return false;
 
-    const next = orderIds.map((id) => map.get(id));
+    const baseSeq = this.nextSeq;
+    const next = orderIds.map((id, idx) => {
+      const entry = map.get(id);
+      entry.orderSeq = baseSeq + idx;
+      return entry;
+    });
+    this.nextSeq = baseSeq + next.length;
     this.items.splice(0, this.items.length, ...next);
     return true;
   }
@@ -583,13 +609,14 @@ class PlaylistStore {
     return {
       capSeconds: this.capSeconds,
       totalSeconds: this.totalSeconds,
-      items: this.items.map(({ id, title, duration, sizeBytes, videoId, thumbnail }) => ({
+      items: this.items.map(({ id, title, duration, sizeBytes, videoId, thumbnail, orderSeq }) => ({
         id,
         title,
         duration,
         sizeBytes,
         videoId: videoId || null,
         thumbnail: thumbnail || null,
+        order: orderSeq,
       })),
     };
   }
@@ -1009,6 +1036,23 @@ async function moveIntoDownloads(tmpPath, desiredName, targetDir = config.downlo
 
 // --------------------------- Routes ------------------------------
 app.get("/api/diag", async (_req, res) => {
+  const sessionWorkerState = {};
+  let totalActive = 0;
+  let totalQueued = 0;
+
+  for (const [sid, ctx] of sessionContexts) {
+    const queue = ctx?.addQueue;
+    if (!queue) continue;
+    const info = {
+      active: queue.activeCount,
+      queued: queue.queuedCount,
+      capacity: queue.capacity,
+    };
+    sessionWorkerState[sid] = info;
+    totalActive += info.active;
+    totalQueued += info.queued;
+  }
+
   res.json({
     ffmpeg: FF,
     ytdlp: YD,
@@ -1019,10 +1063,13 @@ app.get("/api/diag", async (_req, res) => {
     },
     workers: {
       add: {
-        configured: config.addParallelism,
-        active: addQueue.activeCount,
-        queued: addQueue.queuedCount,
-        capacity: addQueue.capacity,
+        configuredPerSession: config.addParallelism,
+        scope: "per-session",
+        totals: {
+          active: totalActive,
+          queued: totalQueued,
+        },
+        sessions: sessionWorkerState,
       },
     },
   });
@@ -1299,6 +1346,7 @@ app.post("/api/add", async (req, res) => {
     return res.status(500).json({ error: "Session error" });
   }
   const playlistStore = ctx.playlist;
+  const requestSeq = playlistStore.issueSeq();
 
   console.log("[add] requested", {
     sessionId: ctx.id,
@@ -1306,6 +1354,7 @@ app.post("/api/add", async (req, res) => {
     quality: quality || null,
     formatId: format_id || null,
     clientToken: client_token || null,
+    orderSeq: requestSeq,
   });
 
   const metaR = await getVideoMetaSmart(url);
@@ -1443,26 +1492,28 @@ app.post("/api/add", async (req, res) => {
         videoId: metaR.meta.id || null,
         thumbnail: pickThumbnail(metaR.meta) || null,
       };
-      playlistStore.add(item);
+      const stored = playlistStore.add(item, requestSeq);
       ctx.lastAccess = Date.now();
       clearCanceledToken(client_token);
       console.log("[add] completed", {
         sessionId: ctx.id,
-        itemId: item.id,
-        title: item.title,
-        duration: item.duration,
-        sizeBytes: item.sizeBytes,
+        itemId: stored.id,
+        title: stored.title,
+        duration: stored.duration,
+        sizeBytes: stored.sizeBytes,
+        orderSeq: stored.orderSeq,
       });
       return {
         status: "success",
         payload: {
           item: {
-            id: item.id,
-            title: item.title,
-            duration: item.duration,
-            sizeBytes: item.sizeBytes,
-            videoId: item.videoId,
-            thumbnail: item.thumbnail,
+            id: stored.id,
+            title: stored.title,
+            duration: stored.duration,
+            sizeBytes: stored.sizeBytes,
+            videoId: stored.videoId,
+            thumbnail: stored.thumbnail,
+            order: stored.orderSeq,
           },
           totalSeconds: playlistStore.totalSeconds,
           capSeconds: playlistStore.capSeconds,
@@ -1477,9 +1528,10 @@ app.post("/api/add", async (req, res) => {
 
   let outcome;
   try {
-    outcome = await addQueue.run(workerTask, {
+    outcome = await ctx.addQueue.run(workerTask, {
       sessionId: ctx.id,
       token: client_token || null,
+      orderSeq: requestSeq,
     });
   } catch (e) {
     clearCanceledToken(client_token);
