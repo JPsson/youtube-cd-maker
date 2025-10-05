@@ -34,6 +34,7 @@ const state = {
 
 let sessionHint = null;
 let refreshRequestId = 0;
+let activeConversionOverlayToken = 0;
 
 const THEME_STORAGE_KEY = "cd-maker-theme";
 
@@ -42,6 +43,90 @@ const progressWatchers = new Map();
 let lastDisclaimerTrigger = null;
 
 const probeCache = new Map(); // key -> { fast, smart, pendingFast, pendingSmart, ts }
+const probeSubscribers = new Map(); // key -> Set<fn({ data, fast, smart })>
+
+function notifyProbeSubscribers(key, { data, fast = false, smart = false } = {}) {
+  const listeners = probeSubscribers.get(key);
+  if (!listeners || !listeners.size) return;
+  listeners.forEach((listener) => {
+    try {
+      listener({ data, fast, smart });
+    } catch (err) {
+      if (typeof console !== "undefined" && typeof console.error === "function") {
+        console.error("probe subscriber error", err);
+      }
+    }
+  });
+}
+
+function subscribeToProbe(url, callback) {
+  if (typeof callback !== "function") return () => {};
+  const key = keyFor(url);
+  if (!key) return () => {};
+  let listeners = probeSubscribers.get(key);
+  if (!listeners) {
+    listeners = new Set();
+    probeSubscribers.set(key, listeners);
+  }
+  listeners.add(callback);
+
+  const entry = probeCache.get(key);
+  if (entry?.fast) {
+    try {
+      callback({ data: entry.fast, fast: true, smart: false });
+    } catch (err) {
+      if (typeof console !== "undefined" && typeof console.error === "function") {
+        console.error("probe subscriber error", err);
+      }
+    }
+  }
+  if (entry?.smart) {
+    try {
+      callback({ data: entry.smart, fast: false, smart: true });
+    } catch (err) {
+      if (typeof console !== "undefined" && typeof console.error === "function") {
+        console.error("probe subscriber error", err);
+      }
+    }
+  }
+
+  return () => {
+    const set = probeSubscribers.get(key);
+    if (!set) return;
+    set.delete(callback);
+    if (!set.size) probeSubscribers.delete(key);
+  };
+}
+
+function applyProbeDataToEntry(entry, data, { fast = false, smart = false } = {}) {
+  if (!entry || !data) return;
+  if (fast) {
+    entry.fast = data;
+    entry.pendingFast = false;
+    entry.fastPromise = null;
+  }
+  if (smart) {
+    entry.smart = data;
+    entry.pendingSmart = false;
+    entry.smartPromise = null;
+  }
+  if (data?.usedClient) {
+    entry.usedClient = data.usedClient;
+  }
+  entry.ts = Date.now();
+}
+
+function cacheProbeData(url, data, flags = {}) {
+  const key = keyFor(url);
+  if (!key || !data) return;
+  let entry = probeCache.get(key);
+  if (!entry) {
+    entry = { pendingFast: false, pendingSmart: false };
+    probeCache.set(key, entry);
+  }
+  applyProbeDataToEntry(entry, data, flags);
+  notifyProbeSubscribers(key, { data, ...flags });
+}
 
 function orderValueOf(item) {
   if (!item) return Infinity;
@@ -507,9 +592,7 @@ class PlaylistRenderer {
     srText.textContent = "Loading";
     const pctText = document.createElement("span");
     pctText.className = "optimisticProgressText";
-    pctText.textContent = typeof item?.progress === "number"
-      ? `${Math.round(item.progress)}%`
-      : "Loading";
+    pctText.textContent = "";
     status.append(spinner, srText, pctText);
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "action danger";
@@ -788,15 +871,15 @@ function ensureOptimisticLoadingIndicator(token, el) {
     const srText = document.createElement("span");
     srText.className = "srOnly";
     srText.textContent = "Loading";
-    const pctText = document.createElement("span");
-    pctText.className = "optimisticProgressText";
-    pctText.textContent = "Loading";
-    el.append(spinner, srText, pctText);
+    const statusText = document.createElement("span");
+    statusText.className = "optimisticProgressText";
+    statusText.textContent = "";
+    el.append(spinner, srText, statusText);
   } else if (!el.querySelector(".optimisticProgressText")) {
-    const pctText = document.createElement("span");
-    pctText.className = "optimisticProgressText";
-    pctText.textContent = "Loading";
-    el.appendChild(pctText);
+    const statusText = document.createElement("span");
+    statusText.className = "optimisticProgressText";
+    statusText.textContent = "";
+    el.appendChild(statusText);
   }
   el.setAttribute("role", "status");
   el.setAttribute("aria-live", "polite");
@@ -813,35 +896,32 @@ function updateOptimisticStatusDisplay(entry) {
   ensureOptimisticLoadingIndicator(entry.token, status);
   const spinner = status.querySelector(".optimisticSpinner");
   const textNode = status.querySelector(".optimisticProgressText");
-  let label = "Loading";
+  let label = "";
+  let ariaLabel = "Loading";
   let busy = true;
-
   let tooltip = "";
 
   if (entry.status === "error") {
     tooltip = entry.message ? String(entry.message) : "";
     label = tooltip && tooltip.length <= 60 ? tooltip : "Failed";
+    ariaLabel = label || "Failed";
     busy = false;
   } else if (entry.status === "canceled") {
-    label = "Canceled";
+    ariaLabel = "Canceled";
     busy = false;
   } else if (entry.status === "success" && entry.done) {
-    label = "Finalizing…";
+    ariaLabel = "Completed";
     busy = false;
-  } else if (typeof entry.progress === "number") {
-    label = `${Math.round(entry.progress)}%`;
-  } else if (entry.status === "queued") {
-    label = "Queued";
   }
 
   if (textNode) {
-    textNode.textContent = label;
+    textNode.textContent = busy ? "" : label;
   }
   if (spinner) {
     spinner.style.display = busy ? "inline-block" : "none";
   }
   status.setAttribute("aria-busy", busy ? "true" : "false");
-  status.setAttribute("aria-label", label);
+  status.setAttribute("aria-label", ariaLabel || "Loading");
   if (tooltip) {
     status.title = tooltip;
   } else {
@@ -1002,29 +1082,54 @@ async function ensureBackgroundProbe(url) {
 
   if (!entry.fast && !entry.pendingFast) {
     entry.pendingFast = true;
-    probe(url, { fast: true })
+    const fastPromise = probe(url, { fast: true })
       .then((d) => {
-        entry.fast = d;
-        entry.pendingFast = false;
-        entry.ts = Date.now();
+        applyProbeDataToEntry(entry, d, { fast: true });
+        notifyProbeSubscribers(key, { data: d, fast: true, smart: false });
+        return d;
       })
-      .catch(() => {
+      .catch((err) => {
         entry.pendingFast = false;
+        entry.fastPromise = null;
+        throw err;
       });
+    entry.fastPromise = fastPromise;
+    fastPromise.catch(() => {});
   }
 
   if (!entry.smart && !entry.pendingSmart) {
     entry.pendingSmart = true;
-    probe(url, { fast: false })
+    const smartPromise = probe(url, { fast: false })
       .then((d) => {
-        entry.smart = d;
-        entry.pendingSmart = false;
-        entry.ts = Date.now();
+        applyProbeDataToEntry(entry, d, { smart: true });
+        notifyProbeSubscribers(key, { data: d, fast: false, smart: true });
+        return d;
       })
-      .catch(() => {
+      .catch((err) => {
         entry.pendingSmart = false;
+        entry.smartPromise = null;
+        throw err;
       });
+    entry.smartPromise = smartPromise;
+    smartPromise.catch(() => {});
   }
+}
+
+function waitForProbeFast(url) {
+  const key = keyFor(url);
+  if (!key) return Promise.resolve(null);
+  let entry = probeCache.get(key);
+  if (entry?.fast) return Promise.resolve(entry.fast);
+  if (entry?.fastPromise) {
+    return entry.fastPromise.then((data) => data).catch(() => null);
+  }
+  ensureBackgroundProbe(url);
+  entry = probeCache.get(key);
+  if (entry?.fast) return Promise.resolve(entry.fast);
+  if (entry?.fastPromise) {
+    return entry.fastPromise.then((data) => data).catch(() => null);
+  }
+  return Promise.resolve(null);
 }
 
 function bestCachedData(url) {
@@ -1083,6 +1188,7 @@ async function handleAddToCd() {
       data = await probe(url, { fast: true });
       bestFormat = data.bestFormat || null;
       usedClient = data.usedClient || null;
+      cacheProbeData(url, data, { fast: true });
       updateOptimisticEntry(token, {
         title: data.title || optimistic.title,
         duration: Number(data.duration || 0),
@@ -1176,6 +1282,50 @@ function describeFormat(bf) {
   return parts.join(" · ");
 }
 
+function pickBestAudioFormat(formats) {
+  if (!Array.isArray(formats) || !formats.length) return null;
+  const normalized = formats
+    .filter((f) => f && f.acodec && f.acodec !== "none")
+    .map((f) => ({
+      ...f,
+      abr:
+        typeof f.abr === "number"
+          ? f.abr
+          : typeof f.tbr === "number"
+          ? Math.round(f.tbr)
+          : undefined,
+      asr:
+        typeof f.asr === "string"
+          ? parseInt(f.asr, 10)
+          : typeof f.asr === "number"
+          ? f.asr
+          : undefined,
+      vcodec: (f.vcodec || "").toLowerCase(),
+      acodec: (f.acodec || "").toLowerCase(),
+    }));
+
+  if (!normalized.length) return null;
+
+  const audioOnly = normalized.filter((f) => !f.vcodec || f.vcodec === "none");
+  const hiAudio = audioOnly.filter((f) => (Number(f.asr) || 0) >= 44100);
+
+  const rankByBitrate = (a, b) =>
+    (Number(b.abr) || 0) - (Number(a.abr) || 0) ||
+    (Number(b.tbr) || 0) - (Number(a.tbr) || 0);
+
+  const pick = (arr, predicate) => arr.filter(predicate).sort(rankByBitrate)[0];
+
+  const isOpus = (f) => f.acodec.includes("opus");
+  const isAac = (f) => f.acodec.includes("aac") || f.acodec.includes("mp4a");
+
+  return (
+    pick(hiAudio, isOpus) ||
+    pick(hiAudio, isAac) ||
+    pick(hiAudio, () => true) ||
+    null
+  );
+}
+
 function triggerBrowserDownload(href) {
   if (!href) return false;
   let url;
@@ -1225,6 +1375,15 @@ async function oneOffDownload(target) {
 
   const ytId = youTubeIdFrom(url);
   const thumbSrc = ytId ? `/thumb/${ytId}?t=${Date.now()}` : null;
+  const overlayToken = ++activeConversionOverlayToken;
+  let bestFormat = null;
+  const applyFormatSubtitle = (format) => {
+    if (!format) return;
+    if (activeConversionOverlayToken !== overlayToken) return;
+    if (overlay?.root?.hidden) return;
+    bestFormat = format;
+    overlay.setSubtitle(describeFormat(format));
+  };
   overlay.showConversion({
     title: `Preparing your ${target.toUpperCase()}`,
     subtitle: "",
@@ -1233,13 +1392,37 @@ async function oneOffDownload(target) {
   dotsAnimator.start();
 
   const cached = bestCachedData(url);
-  let bestFormat = cached?.bestFormat || null;
-
-  if (bestFormat) {
-    overlay.setSubtitle(describeFormat(bestFormat));
+  if (cached?.bestFormat) {
+    bestFormat = cached.bestFormat;
   }
 
+  if (bestFormat) {
+    applyFormatSubtitle(bestFormat);
+  }
+
+  const unsubscribeProbe = subscribeToProbe(url, ({ data }) => {
+    if (!data) return;
+    const candidate =
+      data.bestFormat ||
+      pickBestAudioFormat(data.audioFormats) ||
+      bestFormat ||
+      null;
+    if (candidate) {
+      applyFormatSubtitle(candidate);
+    }
+  });
+
   if (!cached) ensureBackgroundProbe(url);
+
+  if (!bestFormat) {
+    waitForProbeFast(url).then((data) => {
+      if (!data) return;
+      if (!bestFormat && data.bestFormat) {
+        bestFormat = data.bestFormat;
+      }
+      applyFormatSubtitle(data.bestFormat || bestFormat || null);
+    });
+  }
 
   try {
     const body = {
@@ -1326,6 +1509,7 @@ async function oneOffDownload(target) {
   } catch (e) {
     setPickedNoteError(`Network error: ${e.message || e}`);
   } finally {
+    unsubscribeProbe();
     dotsAnimator.stop();
     overlay.hide();
   }

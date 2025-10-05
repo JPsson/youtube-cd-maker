@@ -740,8 +740,13 @@ function scheduleAddJob(ctx, job) {
     orderSeq: job.requestSeq ?? null,
     url: job.url || null,
     startedAt: Date.now(),
+    token: token || null,
+    canceled: false,
+    abort: null,
   };
   ctx.pendingAdds?.set?.(key, pendingInfo);
+
+  job.queueKey = key;
 
   ctx.addQueue
     .run(() => runAddJob(ctx, job), {
@@ -782,13 +787,29 @@ async function runAddJob(ctx, job) {
     usedClient,
     requestSeq,
     meta,
+    queueKey,
   } = job;
 
   const playlistStore = ctx.playlist;
 
-  if (clientToken && isAddCanceled(clientToken)) {
-    clearCanceledToken(clientToken);
-    markAddProgressDone(clientToken, 0, "canceled", "Canceled");
+  const pendingInfo = queueKey ? ctx.pendingAdds?.get?.(queueKey) : null;
+  if (pendingInfo) {
+    pendingInfo.token = clientToken || pendingInfo.token || null;
+    pendingInfo.lastUpdated = Date.now();
+  }
+
+  const isCanceled = () => {
+    if (pendingInfo?.canceled) return true;
+    if (clientToken && isAddCanceled(clientToken)) return true;
+    return false;
+  };
+
+  if (isCanceled()) {
+    if (clientToken) {
+      clearCanceledToken(clientToken);
+      markAddProgressDone(clientToken, 0, "canceled", "Canceled");
+    }
+    if (pendingInfo) pendingInfo.canceled = true;
     return { status: "canceled" };
   }
 
@@ -841,6 +862,15 @@ async function runAddJob(ctx, job) {
     let stdout = "";
     let stderr = "";
 
+    if (pendingInfo) {
+      pendingInfo.abort = () => {
+        try {
+          proc.kill("SIGTERM");
+        } catch {}
+      };
+      pendingInfo.running = true;
+    }
+
     proc.stdout?.on("data", (chunk) => {
       const text = chunk.toString();
       stdout += text;
@@ -855,7 +885,7 @@ async function runAddJob(ctx, job) {
 
     if (clientToken) {
       cancelWatcher = setInterval(() => {
-        if (isAddCanceled(clientToken)) {
+        if (isCanceled()) {
           console.log("[add] terminating yt-dlp for canceled token", clientToken);
           try {
             proc.kill("SIGTERM");
@@ -875,9 +905,10 @@ async function runAddJob(ctx, job) {
       });
     });
 
-    if (clientToken && isAddCanceled(clientToken)) {
+    if (isCanceled()) {
       clearCanceledToken(clientToken);
       markAddProgressDone(clientToken, 0, "canceled", "Canceled");
+      if (pendingInfo) pendingInfo.canceled = true;
       return { status: "canceled" };
     }
 
@@ -898,10 +929,11 @@ async function runAddJob(ctx, job) {
 
     const stat = await fsp.stat(filePath);
 
-    if (clientToken && isAddCanceled(clientToken)) {
+    if (isCanceled()) {
       clearCanceledToken(clientToken);
       markAddProgressDone(clientToken, 0, "canceled", "Canceled");
       await safeUnlink(filePath);
+      if (pendingInfo) pendingInfo.canceled = true;
       return { status: "canceled" };
     }
 
@@ -947,6 +979,11 @@ async function runAddJob(ctx, job) {
   } finally {
     if (cancelWatcher) clearInterval(cancelWatcher);
     clearInterval(keepAliveTimer);
+    if (pendingInfo) {
+      pendingInfo.abort = null;
+      pendingInfo.running = false;
+      pendingInfo.completedAt = Date.now();
+    }
   }
 }
 
@@ -1549,13 +1586,36 @@ app.post("/api/probe", async (req, res) => {
   }
 });
 
-app.post("/api/cancel-add", (req, res) => {
+app.post("/api/cancel-add", async (req, res) => {
   const { token } = req.body || {};
   if (!token || typeof token !== "string") {
     return res.status(400).json({ error: "Missing token" });
   }
   console.log("[add] cancel requested", { token });
   markAddCanceled(token);
+  markAddProgressDone(token, 0, "canceled", "Canceled");
+
+  let ctx = null;
+  if (req.sessionId && sessionContexts.has(req.sessionId)) {
+    ctx = sessionContexts.get(req.sessionId);
+  } else {
+    try {
+      ctx = await getSessionContext(req);
+    } catch (err) {
+      console.warn("[add] cancel session lookup failed", err?.message || err);
+    }
+  }
+
+  if (ctx?.pendingAdds) {
+    for (const info of ctx.pendingAdds.values()) {
+      if (!info || info.token !== token) continue;
+      info.canceled = true;
+      try {
+        info.abort?.();
+      } catch {}
+    }
+  }
+
   res.status(204).end();
 });
 
