@@ -5,6 +5,7 @@ import express from "express";
 import { spawn } from "child_process";
 import fs from "fs";
 import fsp from "fs/promises";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import { nanoid } from "nanoid";
@@ -14,6 +15,23 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
 // --------------------------- App setup ---------------------------
+const cpuCount = (() => {
+  try {
+    const list = typeof os.cpus === "function" ? os.cpus() : [];
+    return Array.isArray(list) ? list.length : 0;
+  } catch {
+    return 0;
+  }
+})();
+
+const envAddParallelism = Number(process.env.ADD_PARALLELISM);
+const normalizedEnvAddParallelism = Number.isFinite(envAddParallelism) && envAddParallelism > 0
+  ? Math.max(1, Math.floor(envAddParallelism))
+  : null;
+
+const computedAddParallelism = normalizedEnvAddParallelism
+  ?? (cpuCount > 0 ? Math.min(Math.max(cpuCount, 1), 8) : 4);
+
 const config = {
   port: Number(process.env.PORT) || 3000,
   capSeconds: 80 * 60,
@@ -22,7 +40,14 @@ const config = {
   sessionIdleTtlMs: Number(process.env.SESSION_IDLE_TTL_MS) || 1000 * 60 * 60 * 6, // 6 hours
   downloadTokenTtlMs: Number(process.env.DOWNLOAD_TOKEN_TTL_MS) || 1000 * 60 * 30, // 30 minutes
   cookieSecure: process.env.COOKIE_SECURE === "true",
+  addParallelism: computedAddParallelism,
 };
+
+console.log("[add] worker pool configured", {
+  parallelism: config.addParallelism,
+  cpuCount,
+  source: normalizedEnvAddParallelism ? "env" : "auto",
+});
 
 await fsp.mkdir(config.downloadDir, { recursive: true });
 await fsp.mkdir(config.tmpDir, { recursive: true });
@@ -34,6 +59,88 @@ const DOWNLOAD_TOKEN_TTL = Math.max(60_000, config.downloadTokenTtlMs);
 const sessionContexts = new Map(); // sid -> context
 const sessionCreationPromises = new Map(); // sid -> promise
 const downloadTokenIndex = new Map(); // token -> { sessionId, path, filename, expiresAt }
+
+class ParallelWorkQueue {
+  constructor(limit, { name } = {}) {
+    this.limit = Math.max(1, Number(limit) || 1);
+    this.name = name || null;
+    this.active = 0;
+    this.queue = [];
+  }
+
+  get activeCount() {
+    return this.active;
+  }
+
+  get queuedCount() {
+    return this.queue.length;
+  }
+
+  get capacity() {
+    return this.limit;
+  }
+
+  logState(event, meta = {}) {
+    if (!this.name) return;
+    try {
+      console.log(`[${this.name}] ${event}`, {
+        ...meta,
+        active: this.active,
+        queued: this.queue.length,
+        capacity: this.limit,
+      });
+    } catch {
+      // ignore logging errors
+    }
+  }
+
+  run(task, meta = {}) {
+    if (typeof task !== "function") {
+      return Promise.reject(new TypeError("Task must be a function"));
+    }
+
+    return new Promise((resolve, reject) => {
+      const job = async () => {
+        this.active += 1;
+        this.logState("start", meta);
+        let settled = false;
+        try {
+          const result = await task();
+          settled = true;
+          resolve(result);
+        } catch (err) {
+          settled = true;
+          reject(err);
+        } finally {
+          this.active = Math.max(0, this.active - 1);
+          this.logState("end", meta);
+          if (!settled) {
+            // Ensure the promise settles even if task() threw synchronously
+            resolve(undefined);
+          }
+          this._drain();
+        }
+      };
+
+      this.queue.push(job);
+      this.logState("queued", meta);
+      this._drain();
+    });
+  }
+
+  _drain() {
+    while (this.active < this.limit && this.queue.length) {
+      const next = this.queue.shift();
+      try {
+        next?.();
+      } catch (err) {
+        console.error(`[${this.name || "queue"}] worker crashed:`, err?.message || err);
+      }
+    }
+  }
+}
+
+const addQueue = new ParallelWorkQueue(config.addParallelism, { name: "add-workers" });
 
 function parseCookies(header) {
   const out = Object.create(null);
@@ -910,6 +1017,14 @@ app.get("/api/diag", async (_req, res) => {
       path: COOKIES_PATH,
       source: COOKIES_SOURCE,
     },
+    workers: {
+      add: {
+        configured: config.addParallelism,
+        active: addQueue.activeCount,
+        queued: addQueue.queuedCount,
+        capacity: addQueue.capacity,
+      },
+    },
   });
 });
 
@@ -1208,9 +1323,34 @@ app.post("/api/add", async (req, res) => {
     return res.json({ canceled: true, client_token });
   }
 
-  let filePath = null;
+  let aborted = false;
+  req.on("aborted", () => {
+    aborted = true;
+    console.warn("[add] request aborted", {
+      sessionId: ctx.id,
+      clientToken: client_token || null,
+    });
+    if (client_token) {
+      markAddCanceled(client_token);
+      markAddProgressDone(client_token, 0);
+    }
+  });
 
-  try {
+  const workerTask = async () => {
+    if (aborted) {
+      if (client_token) {
+        clearCanceledToken(client_token);
+        markAddProgressDone(client_token, 0);
+      }
+      return { status: "canceled" };
+    }
+
+    if (client_token && isAddCanceled(client_token)) {
+      clearCanceledToken(client_token);
+      markAddProgressDone(client_token, 0);
+      return { status: "canceled" };
+    }
+
     const q = (quality || "").toLowerCase();
     const audioQuality = (q === "320" || q === "320k") ? "320K" : "0"; // default V0
     const args = [];
@@ -1242,96 +1382,129 @@ app.post("/api/add", async (req, res) => {
       url
     );
 
-    const proc = runYtDlp(args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
+    let filePath = null;
+    try {
+      const proc = runYtDlp(args, { stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
 
-    proc.stdout?.on("data", (chunk) => {
-      const text = chunk.toString();
-      stdout += text;
-      if (client_token) updateProgressFromYtDlp(client_token, text);
-    });
-
-    proc.stderr?.on("data", (chunk) => {
-      const text = chunk.toString();
-      stderr += text;
-      if (client_token) updateProgressFromYtDlp(client_token, text);
-    });
-
-    const code = await new Promise((resolve) => {
-      proc.on("error", (err) => {
-        stderr += `\n${err?.message || err}`;
-        resolve(-1);
+      proc.stdout?.on("data", (chunk) => {
+        const text = chunk.toString();
+        stdout += text;
+        if (client_token) updateProgressFromYtDlp(client_token, text);
       });
-      proc.on("close", (exitCode) => {
-        resolve(exitCode);
-      });
-    });
 
-    if (client_token) {
-      if (code === 0) {
-        markAddProgressDone(client_token);
-      } else {
-        markAddProgressDone(client_token, 0);
+      proc.stderr?.on("data", (chunk) => {
+        const text = chunk.toString();
+        stderr += text;
+        if (client_token) updateProgressFromYtDlp(client_token, text);
+      });
+
+      const code = await new Promise((resolve) => {
+        proc.on("error", (err) => {
+          stderr += `\n${err?.message || err}`;
+          resolve(-1);
+        });
+        proc.on("close", (exitCode) => {
+          resolve(exitCode);
+        });
+      });
+
+      if (client_token) {
+        if (code === 0) {
+          markAddProgressDone(client_token);
+        } else {
+          markAddProgressDone(client_token, 0);
+        }
       }
-    }
 
-    if (code !== 0) throw new Error(`yt-dlp exit ${code}: ${stderr}`);
+      if (code !== 0) throw new Error(`yt-dlp exit ${code}: ${stderr}`);
 
-    filePath = stdout.trim().split(/\r?\n/).filter(Boolean).pop();
-    if (!filePath) {
-      throw new Error("Failed to determine output file path");
-    }
-    const stat = await fsp.stat(filePath);
+      filePath = stdout.trim().split(/\r?\n/).filter(Boolean).pop();
+      if (!filePath) {
+        throw new Error("Failed to determine output file path");
+      }
+      const stat = await fsp.stat(filePath);
 
-    if (client_token && isAddCanceled(client_token)) {
+      if (client_token && isAddCanceled(client_token)) {
+        clearCanceledToken(client_token);
+        markAddProgressDone(client_token, 0);
+        await safeUnlink(filePath);
+        filePath = null;
+        return { status: "canceled" };
+      }
+
+      const item = {
+        id: nanoid(8),
+        title: metaR.meta.title || path.basename(filePath),
+        duration: Number(metaR.meta.duration) || 0,
+        filepath: filePath,
+        sizeBytes: stat.size,
+        videoId: metaR.meta.id || null,
+        thumbnail: pickThumbnail(metaR.meta) || null,
+      };
+      playlistStore.add(item);
+      ctx.lastAccess = Date.now();
       clearCanceledToken(client_token);
-      markAddProgressDone(client_token, 0);
-      await safeUnlink(filePath);
-      return res.json({ canceled: true, client_token });
-    }
-
-    const item = {
-      id: nanoid(8),
-      title: metaR.meta.title || path.basename(filePath),
-      duration: Number(metaR.meta.duration) || 0,
-      filepath: filePath,
-      sizeBytes: stat.size,
-      videoId: metaR.meta.id || null,
-      thumbnail: pickThumbnail(metaR.meta) || null,
-    };
-    playlistStore.add(item);
-    ctx.lastAccess = Date.now();
-    clearCanceledToken(client_token);
-    console.log("[add] completed", {
-      sessionId: ctx.id,
-      itemId: item.id,
-      title: item.title,
-      duration: item.duration,
-      sizeBytes: item.sizeBytes,
-    });
-    res.json({
-      item: {
-        id: item.id,
+      console.log("[add] completed", {
+        sessionId: ctx.id,
+        itemId: item.id,
         title: item.title,
         duration: item.duration,
         sizeBytes: item.sizeBytes,
-        videoId: item.videoId,
-        thumbnail: item.thumbnail,
-      },
-      totalSeconds: playlistStore.totalSeconds,
-      capSeconds: playlistStore.capSeconds,
-      client_token,
+      });
+      return {
+        status: "success",
+        payload: {
+          item: {
+            id: item.id,
+            title: item.title,
+            duration: item.duration,
+            sizeBytes: item.sizeBytes,
+            videoId: item.videoId,
+            thumbnail: item.thumbnail,
+          },
+          totalSeconds: playlistStore.totalSeconds,
+          capSeconds: playlistStore.capSeconds,
+          client_token,
+        },
+      };
+    } catch (err) {
+      if (filePath) await safeUnlink(filePath);
+      throw err;
+    }
+  };
+
+  let outcome;
+  try {
+    outcome = await addQueue.run(workerTask, {
+      sessionId: ctx.id,
+      token: client_token || null,
     });
   } catch (e) {
     clearCanceledToken(client_token);
     if (client_token) {
       markAddProgressDone(client_token, 0);
     }
-    if (filePath) await safeUnlink(filePath);
     console.error("[add] error:", e?.message || e);
-    res.status(500).json({ error: "Convert failed", message: String(e?.message || e) });
+    if (!aborted && !res.headersSent) {
+      res.status(500).json({ error: "Convert failed", message: String(e?.message || e) });
+    }
+    return;
   }
+
+  if (aborted) {
+    return;
+  }
+
+  if (!outcome || outcome.status === "canceled") {
+    if (!res.headersSent) {
+      res.json({ canceled: true, client_token });
+    }
+    return;
+  }
+
+  res.json(outcome.payload);
 });
 
 // One-off conversion endpoint (MP3 or WAV) that prepares a download link
