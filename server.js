@@ -214,17 +214,45 @@ setInterval(() => {
 
 function sessionCookieMiddleware(req, res, next) {
   const cookies = parseCookies(req.headers?.cookie);
-  let sid = sanitizeSessionId(cookies[SESSION_COOKIE_NAME]);
+  const cookieSid = sanitizeSessionId(cookies[SESSION_COOKIE_NAME]);
+  const rawHeaderHint = req.headers?.["x-cd-session"];
+  const headerHint = sanitizeSessionId(Array.isArray(rawHeaderHint) ? rawHeaderHint[0] : rawHeaderHint);
+
+  const requestInfo = { method: req.method, url: req.originalUrl || req.url };
+
+  const headerKnown =
+    headerHint && (sessionContexts.has(headerHint) || sessionCreationPromises.has(headerHint));
+
+  let sid = cookieSid;
+
+  if (headerHint && (!sid || sid !== headerHint)) {
+    if (headerKnown) {
+      sid = headerHint;
+      console.log("[session] restored from hint", { sessionId: sid, ...requestInfo });
+    } else if (!sid) {
+      sid = headerHint;
+      console.log("[session] adopting hinted id", { sessionId: sid, ...requestInfo });
+    }
+  }
+
   if (!sid) {
     sid = nanoid(24);
-    console.log("[session] issued new session id", sid);
+    console.log("[session] issued new session id", sid, requestInfo);
   }
+
   req.sessionId = sid;
   try {
     setCookie(res, buildSessionCookie(sid));
   } catch (err) {
     console.warn("[session] failed to set cookie:", err?.message || err);
   }
+
+  try {
+    res.setHeader("X-CD-Session", sid);
+  } catch (err) {
+    console.warn("[session] failed to set session header:", err?.message || err);
+  }
+
   next();
 }
 
@@ -317,6 +345,12 @@ async function serveDownload(req, res, { head = false } = {}) {
     } catch (err) {
       console.warn("[downloads] failed to rebind session cookie:", err?.message || err);
     }
+  }
+
+  try {
+    res.setHeader("X-CD-Session", entry.sessionId);
+  } catch (err) {
+    console.warn("[downloads] failed to set session header:", err?.message || err);
   }
 
   let stat;
