@@ -32,6 +32,7 @@ const state = {
 };
 
 let sessionHint = null;
+let refreshRequestId = 0;
 
 const THEME_STORAGE_KEY = "cd-maker-theme";
 
@@ -626,10 +627,37 @@ async function sessionFetch(input, init = {}) {
 }
 
 async function refresh() {
+  const requestId = ++refreshRequestId;
   const r = await sessionFetch("/api/list");
-  state.server = await r.json();
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.statusText || "Request failed");
+    throw new Error(msg || `Request failed with status ${r.status}`);
+  }
+
+  const next = await r.json();
+  const nextItems = Array.isArray(next?.items) ? next.items : [];
+  const currentItems = Array.isArray(state.server.items) ? state.server.items : [];
+  const hasPendingAdds = state.optimisticAdds.length > 0 || pendingAddRequests.size > 0;
+
+  if (requestId !== refreshRequestId) {
+    return null;
+  }
+
+  if (hasPendingAdds && nextItems.length < currentItems.length) {
+    return null;
+  }
+
+  state.server = {
+    capSeconds:
+      typeof next?.capSeconds === "number" ? next.capSeconds : state.server.capSeconds,
+    totalSeconds:
+      typeof next?.totalSeconds === "number" ? next.totalSeconds : state.server.totalSeconds,
+    items: nextItems,
+  };
+
   if (!Array.isArray(state.server.items)) state.server.items = [];
   syncUI();
+  return state.server;
 }
 
 function stopOptimisticLoading(token) {
@@ -846,6 +874,12 @@ async function handleAddToCd() {
         state.server.capSeconds = resBody.capSeconds;
       }
       syncUI();
+      pendingAddRequests.delete(token);
+      try {
+        await refresh();
+      } catch (err) {
+        console.warn("Failed to refresh playlist after add:", err);
+      }
       return;
     }
 
