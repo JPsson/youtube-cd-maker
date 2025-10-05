@@ -37,8 +37,8 @@ let refreshRequestId = 0;
 
 const THEME_STORAGE_KEY = "cd-maker-theme";
 
-const pendingAddRequests = new Map();
 const optimisticLoadingIndicators = new Map();
+const progressWatchers = new Map();
 let lastDisclaimerTrigger = null;
 
 const probeCache = new Map(); // key -> { fast, smart, pendingFast, pendingSmart, ts }
@@ -505,7 +505,12 @@ class PlaylistRenderer {
     const srText = document.createElement("span");
     srText.className = "srOnly";
     srText.textContent = "Loading";
-    status.append(spinner, srText);
+    const pctText = document.createElement("span");
+    pctText.className = "optimisticProgressText";
+    pctText.textContent = typeof item?.progress === "number"
+      ? `${Math.round(item.progress)}%`
+      : "Loading";
+    status.append(spinner, srText, pctText);
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "action danger";
     cancelBtn.dataset.cancel = item.token;
@@ -735,7 +740,7 @@ async function refresh() {
     return 0;
   });
   const currentItems = Array.isArray(state.server.items) ? state.server.items : [];
-  const hasPendingAdds = state.optimisticAdds.length > 0 || pendingAddRequests.size > 0;
+  const hasPendingAdds = state.optimisticAdds.length > 0;
 
   if (requestId !== refreshRequestId) {
     return null;
@@ -783,12 +788,65 @@ function ensureOptimisticLoadingIndicator(token, el) {
     const srText = document.createElement("span");
     srText.className = "srOnly";
     srText.textContent = "Loading";
-    el.append(spinner, srText);
+    const pctText = document.createElement("span");
+    pctText.className = "optimisticProgressText";
+    pctText.textContent = "Loading";
+    el.append(spinner, srText, pctText);
+  } else if (!el.querySelector(".optimisticProgressText")) {
+    const pctText = document.createElement("span");
+    pctText.className = "optimisticProgressText";
+    pctText.textContent = "Loading";
+    el.appendChild(pctText);
   }
   el.setAttribute("role", "status");
   el.setAttribute("aria-live", "polite");
   el.setAttribute("aria-busy", "true");
   el.setAttribute("aria-label", "Loading");
+}
+
+function updateOptimisticStatusDisplay(entry) {
+  if (!entry?.token || !dom.listBody) return;
+  const row = dom.listBody.querySelector(`tr[data-optimistic-token="${entry.token}"]`);
+  if (!row) return;
+  const status = row.querySelector(".optimisticProgress");
+  if (!status) return;
+  ensureOptimisticLoadingIndicator(entry.token, status);
+  const spinner = status.querySelector(".optimisticSpinner");
+  const textNode = status.querySelector(".optimisticProgressText");
+  let label = "Loading";
+  let busy = true;
+
+  let tooltip = "";
+
+  if (entry.status === "error") {
+    tooltip = entry.message ? String(entry.message) : "";
+    label = tooltip && tooltip.length <= 60 ? tooltip : "Failed";
+    busy = false;
+  } else if (entry.status === "canceled") {
+    label = "Canceled";
+    busy = false;
+  } else if (entry.status === "success" && entry.done) {
+    label = "Finalizing…";
+    busy = false;
+  } else if (typeof entry.progress === "number") {
+    label = `${Math.round(entry.progress)}%`;
+  } else if (entry.status === "queued") {
+    label = "Queued";
+  }
+
+  if (textNode) {
+    textNode.textContent = label;
+  }
+  if (spinner) {
+    spinner.style.display = busy ? "inline-block" : "none";
+  }
+  status.setAttribute("aria-busy", busy ? "true" : "false");
+  status.setAttribute("aria-label", label);
+  if (tooltip) {
+    status.title = tooltip;
+  } else {
+    status.removeAttribute("title");
+  }
 }
 
 function refreshOptimisticLoadingIndicators() {
@@ -803,27 +861,124 @@ function refreshOptimisticLoadingIndicators() {
 
   state.optimisticAdds.forEach((entry) => {
     if (!entry?.token) return;
-    const row = dom.listBody.querySelector(`tr[data-optimistic-token="${entry.token}"]`);
-    if (!row) return;
-    const status = row.querySelector(".optimisticProgress");
-    if (!status) return;
-    ensureOptimisticLoadingIndicator(entry.token, status);
+    updateOptimisticStatusDisplay(entry);
   });
 }
 
-function updateOptimisticEntry(token, patch) {
+function updateOptimisticEntry(token, patch, { silent = false } = {}) {
   const entry = state.optimisticAdds.find((o) => o.token === token);
   if (!entry) return;
   Object.assign(entry, patch);
-  syncUI();
+  if (silent) {
+    refreshOptimisticLoadingIndicators();
+  } else {
+    syncUI();
+  }
 }
 
 function removeOptimisticEntry(token, { silent = false } = {}) {
   stopOptimisticLoading(token);
+  stopProgressWatcher(token);
   const idx = state.optimisticAdds.findIndex((o) => o.token === token);
   if (idx === -1) return;
   state.optimisticAdds.splice(idx, 1);
   if (!silent) syncUI();
+}
+
+function stopProgressWatcher(token) {
+  if (!token) return;
+  const watcher = progressWatchers.get(token);
+  if (!watcher) return;
+  watcher.stopped = true;
+  if (watcher.timer) clearTimeout(watcher.timer);
+  progressWatchers.delete(token);
+}
+
+function startProgressWatcher(token) {
+  if (!token || progressWatchers.has(token)) return;
+  const watcher = { timer: null, backoff: 2000, stopped: false };
+
+  const poll = async () => {
+    if (watcher.stopped) return;
+    try {
+      const r = await sessionFetch(`/api/add-progress/${encodeURIComponent(token)}`);
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      const data = await r.json();
+      const keepGoing = await handleAddProgressUpdate(token, data);
+      watcher.backoff = 2000;
+      if (!keepGoing) {
+        stopProgressWatcher(token);
+        return;
+      }
+    } catch (err) {
+      watcher.backoff = Math.min((watcher.backoff || 2000) * 1.5, 10000);
+    }
+    if (!watcher.stopped) {
+      watcher.timer = setTimeout(poll, watcher.backoff || 2000);
+    }
+  };
+
+  watcher.timer = setTimeout(poll, 0);
+  progressWatchers.set(token, watcher);
+}
+
+async function handleAddProgressUpdate(token, body) {
+  const entry = state.optimisticAdds.find((o) => o.token === token);
+  if (!entry) {
+    return false;
+  }
+
+  const patch = {};
+  if (typeof body?.progress === "number" && Number.isFinite(body.progress)) {
+    patch.progress = body.progress;
+  }
+  if (typeof body?.done === "boolean") {
+    patch.done = body.done;
+  }
+  if (body?.status) {
+    patch.status = body.status;
+  }
+  if (body?.message) {
+    patch.message = body.message;
+  }
+
+  updateOptimisticEntry(token, patch, { silent: true });
+  const updated = state.optimisticAdds.find((o) => o.token === token);
+  if (updated) {
+    updateOptimisticStatusDisplay(updated);
+  }
+
+  if (!updated) {
+    return false;
+  }
+
+  if (!updated.done) {
+    return true;
+  }
+
+  if (updated.status === "success") {
+    removeOptimisticEntry(token, { silent: true });
+    try {
+      await refresh();
+    } catch (err) {
+      console.warn("Failed to refresh playlist after completion:", err);
+      syncUI();
+    }
+    return false;
+  }
+
+  if (updated.status === "canceled") {
+    removeOptimisticEntry(token);
+    return false;
+  }
+
+  removeOptimisticEntry(token);
+  if (updated.message) {
+    setPickedNoteError(`Failed to add this link: ${updated.message}`);
+  } else {
+    setPickedNoteError("Failed to add this link.");
+  }
+  return false;
 }
 
 async function probe(url, { fast = false } = {}) {
@@ -903,6 +1058,9 @@ async function handleAddToCd() {
     duration: 0,
     orderHint,
     createdAt: Date.now(),
+    progress: 0,
+    status: "queued",
+    done: false,
   };
   state.optimisticAdds.push(optimistic);
   syncUI();
@@ -935,8 +1093,6 @@ async function handleAddToCd() {
     }
   }
 
-  const controller = new AbortController();
-  pendingAddRequests.set(token, controller);
   try {
     const payload = bestFormat
       ? {
@@ -951,19 +1107,10 @@ async function handleAddToCd() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      signal: controller.signal,
     });
 
     if (!r.ok) throw new Error(await r.text());
     const resBody = await r.json();
-
-    if (resBody?.canceled) {
-      removeOptimisticEntry(token, { silent: true });
-      syncUI();
-      return;
-    }
-
-    removeOptimisticEntry(token, { silent: true });
 
     if (resBody?.item) {
       if (!Array.isArray(state.server.items)) state.server.items = [];
@@ -981,7 +1128,6 @@ async function handleAddToCd() {
         state.server.capSeconds = resBody.capSeconds;
       }
       syncUI();
-      pendingAddRequests.delete(token);
       try {
         await refresh();
       } catch (err) {
@@ -990,20 +1136,33 @@ async function handleAddToCd() {
       return;
     }
 
-    await refresh();
-  } catch (e) {
-    if (controller.signal.aborted) {
-      const stillPending = state.optimisticAdds.some((o) => o.token === token);
-      if (stillPending) {
-        removeOptimisticEntry(token, { silent: true });
-        syncUI();
+    if (resBody?.accepted) {
+      const patch = {};
+      if (resBody.title) {
+        patch.title = resBody.title;
       }
+      if (typeof resBody.duration === "number" && Number.isFinite(resBody.duration)) {
+        patch.duration = Number(resBody.duration);
+      }
+      if (typeof resBody.order === "number" && Number.isFinite(resBody.order)) {
+        patch.orderHint = resBody.order;
+        registerOrderCursor(resBody.order);
+      }
+      updateOptimisticEntry(token, patch);
+      startProgressWatcher(token);
       return;
     }
+
+    if (resBody?.canceled) {
+      removeOptimisticEntry(token, { silent: true });
+      syncUI();
+      return;
+    }
+
+    await refresh();
+  } catch (e) {
     setPickedNoteError("Failed to add this link.");
     removeOptimisticEntry(token);
-  } finally {
-    pendingAddRequests.delete(token);
   }
 }
 
@@ -1249,8 +1408,6 @@ async function handleRemove(id) {
 
 function handleCancel(token) {
   if (!token) return;
-  const controller = pendingAddRequests.get(token);
-  if (controller) controller.abort();
   removeOptimisticEntry(token);
   sessionFetch("/api/cancel-add", {
     method: "POST",
@@ -1262,6 +1419,7 @@ function handleCancel(token) {
 
 async function handleClear() {
   if (!confirm("Clear the whole list and delete files?")) return;
+  progressWatchers.forEach((_, token) => stopProgressWatcher(token));
   state.optimisticAdds.length = 0;
   optimisticLoadingIndicators.forEach((_, token) => stopOptimisticLoading(token));
   state.nextOrderHint = 1;

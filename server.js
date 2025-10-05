@@ -235,6 +235,7 @@ async function createSessionContext(sessionId) {
     scratchDir,
     downloadsDir,
     downloadTokens: new Set(),
+    pendingAdds: new Map(),
     lastAccess: Date.now(),
   };
 
@@ -285,6 +286,7 @@ async function destroySessionContext(sessionId) {
     dropDownloadToken(token, downloadTokenIndex.get(token));
   }
   ctx.downloadTokens.clear();
+  ctx.pendingAdds?.clear?.();
 
   const cleared = ctx.playlist.clear();
   await Promise.allSettled(cleared.map((item) => safeUnlink(item?.filepath)));
@@ -672,7 +674,7 @@ function purgeAddProgress() {
   }
 }
 
-function setAddProgress(token, value, { done = false } = {}) {
+function setAddProgress(token, value, { done = false, status, message } = {}) {
   if (!token) return;
   purgeAddProgress();
   const raw = Number(value);
@@ -685,17 +687,31 @@ function setAddProgress(token, value, { done = false } = {}) {
   if (prevLogged === null || done !== prev?.done || Math.abs(nextValue - prevLogged) >= 5) {
     console.log("[add] progress", { token, value: nextValue, done });
   }
+  let nextStatus = prev?.status ?? null;
+  if (status !== undefined) {
+    nextStatus = status === null ? null : String(status);
+    if (nextStatus !== prev?.status) {
+      console.log("[add] progress status", { token, status: nextStatus });
+    }
+  }
+  let nextMessage = prev?.message ?? null;
+  if (message !== undefined) {
+    const str = message === null || message === undefined ? null : String(message).trim();
+    nextMessage = str || null;
+  }
   addProgressMap.set(token, {
     value: nextValue,
     done: Boolean(done),
+    status: nextStatus,
+    message: nextMessage,
     expiresAt: Date.now() + (done ? ADD_PROGRESS_DONE_TTL : ADD_PROGRESS_ACTIVE_TTL),
     loggedValue: nextValue,
   });
 }
 
-function markAddProgressDone(token, value = 100) {
+function markAddProgressDone(token, value = 100, status = "success", message = null) {
   if (!token) return;
-  setAddProgress(token, value, { done: true });
+  setAddProgress(token, value, { done: true, status, message });
 }
 
 function readAddProgress(token) {
@@ -703,7 +719,235 @@ function readAddProgress(token) {
   purgeAddProgress();
   const entry = addProgressMap.get(token);
   if (!entry) return null;
-  return { value: entry.value, done: entry.done };
+  return {
+    value: entry.value,
+    done: entry.done,
+    status: entry.status ?? null,
+    message: entry.message ?? null,
+  };
+}
+
+function scheduleAddJob(ctx, job) {
+  if (!ctx || !job) return;
+  const token = job.clientToken || null;
+  const key = token || `seq:${job.requestSeq ?? nanoid(6)}`;
+  ctx.lastAccess = Date.now();
+  if (token) {
+    clearCanceledToken(token);
+    setAddProgress(token, 0, { status: "queued" });
+  }
+  const pendingInfo = {
+    orderSeq: job.requestSeq ?? null,
+    url: job.url || null,
+    startedAt: Date.now(),
+  };
+  ctx.pendingAdds?.set?.(key, pendingInfo);
+
+  ctx.addQueue
+    .run(() => runAddJob(ctx, job), {
+      sessionId: ctx.id,
+      token: token || null,
+      orderSeq: job.requestSeq ?? null,
+    })
+    .then((outcome) => {
+      if (!outcome) return;
+      if (outcome.status === "error" && outcome.error) {
+        console.error("[add] job error:", outcome.error?.message || outcome.error);
+      }
+      if (outcome.status === "canceled") {
+        console.log("[add] job canceled", {
+          sessionId: ctx.id,
+          token: token || null,
+          orderSeq: job.requestSeq ?? null,
+        });
+      }
+    })
+    .catch((err) => {
+      console.error("[add] worker crashed:", err?.message || err);
+      if (token) {
+        markAddProgressDone(token, 0, "error", err?.message || "Worker crashed");
+      }
+    })
+    .finally(() => {
+      ctx.pendingAdds?.delete?.(key);
+    });
+}
+
+async function runAddJob(ctx, job) {
+  const {
+    url,
+    quality,
+    formatId,
+    clientToken,
+    usedClient,
+    requestSeq,
+    meta,
+  } = job;
+
+  const playlistStore = ctx.playlist;
+
+  if (clientToken && isAddCanceled(clientToken)) {
+    clearCanceledToken(clientToken);
+    markAddProgressDone(clientToken, 0, "canceled", "Canceled");
+    return { status: "canceled" };
+  }
+
+  if (clientToken) {
+    setAddProgress(clientToken, 0, { status: "running" });
+  }
+
+  ctx.lastAccess = Date.now();
+
+  const q = (quality || "").toLowerCase();
+  const audioQuality = (q === "320" || q === "320k") ? "320K" : "0"; // default V0
+  const args = [];
+  const keepAliveEvery = Math.max(30_000, Math.min(Math.floor(SESSION_COOKIE_MAX_AGE / 2), 120_000));
+  const keepAliveTimer = setInterval(() => {
+    ctx.lastAccess = Date.now();
+  }, keepAliveEvery);
+  keepAliveTimer.unref?.();
+
+  const extractorArg = job.extractorArgs || usedClient || "";
+  if (extractorArg && extractorArg.trim()) args.push("--extractor-args", extractorArg);
+  if (COOKIES_PATH) args.push("--cookies", COOKIES_PATH);
+  if (YTDLP_EXTRA) args.push(...splitArgs(YTDLP_EXTRA));
+
+  const looksLikePath =
+    FF.bin && (FF.bin.startsWith("/") || FF.bin.includes("\\") || /^[A-Za-z]:\\/.test(FF.bin));
+  if (looksLikePath) args.push("--ffmpeg-location", FF.bin);
+
+  if (formatId) args.push("-f", String(formatId));
+
+  args.push(
+    "-x",
+    "--audio-format",
+    "mp3",
+    "--audio-quality",
+    audioQuality,
+    "--no-playlist",
+    "--restrict-filenames",
+    "-o",
+    path.join(ctx.trackDir, "%(title)s-%(id)s.%(ext)s"),
+    "--print",
+    "after_move:filepath",
+    "--newline",
+    url
+  );
+
+  let filePath = null;
+  let cancelWatcher = null;
+  try {
+    const proc = runYtDlp(args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout?.on("data", (chunk) => {
+      const text = chunk.toString();
+      stdout += text;
+      if (clientToken) updateProgressFromYtDlp(clientToken, text, ctx);
+    });
+
+    proc.stderr?.on("data", (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+      if (clientToken) updateProgressFromYtDlp(clientToken, text, ctx);
+    });
+
+    if (clientToken) {
+      cancelWatcher = setInterval(() => {
+        if (isAddCanceled(clientToken)) {
+          console.log("[add] terminating yt-dlp for canceled token", clientToken);
+          try {
+            proc.kill("SIGTERM");
+          } catch {}
+        }
+      }, 5_000);
+      cancelWatcher.unref?.();
+    }
+
+    const code = await new Promise((resolve) => {
+      proc.on("error", (err) => {
+        stderr += `\n${err?.message || err}`;
+        resolve(-1);
+      });
+      proc.on("close", (exitCode) => {
+        resolve(exitCode);
+      });
+    });
+
+    if (clientToken && isAddCanceled(clientToken)) {
+      clearCanceledToken(clientToken);
+      markAddProgressDone(clientToken, 0, "canceled", "Canceled");
+      return { status: "canceled" };
+    }
+
+    if (code !== 0) {
+      if (clientToken) {
+        markAddProgressDone(clientToken, 0, "error", `yt-dlp exit ${code}`);
+      }
+      throw new Error(`yt-dlp exit ${code}: ${stderr}`);
+    }
+
+    filePath = stdout.trim().split(/\r?\n/).filter(Boolean).pop();
+    if (!filePath) {
+      if (clientToken) {
+        markAddProgressDone(clientToken, 0, "error", "No output file");
+      }
+      throw new Error("Failed to determine output file path");
+    }
+
+    const stat = await fsp.stat(filePath);
+
+    if (clientToken && isAddCanceled(clientToken)) {
+      clearCanceledToken(clientToken);
+      markAddProgressDone(clientToken, 0, "canceled", "Canceled");
+      await safeUnlink(filePath);
+      return { status: "canceled" };
+    }
+
+    const item = {
+      id: nanoid(8),
+      title: meta?.title || path.basename(filePath),
+      duration: Number(meta?.duration) || 0,
+      filepath: filePath,
+      sizeBytes: stat.size,
+      videoId: meta?.id || null,
+      thumbnail: pickThumbnail(meta) || null,
+    };
+    const stored = playlistStore.add(item, requestSeq);
+    ctx.lastAccess = Date.now();
+    clearCanceledToken(clientToken);
+    if (clientToken) {
+      markAddProgressDone(clientToken, 100, "success");
+    }
+    console.log("[add] completed", {
+      sessionId: ctx.id,
+      itemId: stored.id,
+      title: stored.title,
+      duration: stored.duration,
+      sizeBytes: stored.sizeBytes,
+      orderSeq: stored.orderSeq,
+    });
+    return {
+      status: "success",
+      item: stored,
+      totals: {
+        totalSeconds: playlistStore.totalSeconds,
+        capSeconds: playlistStore.capSeconds,
+      },
+    };
+  } catch (err) {
+    if (clientToken && !isAddCanceled(clientToken)) {
+      markAddProgressDone(clientToken, 0, "error", err?.message || err);
+    }
+    if (filePath) {
+      await safeUnlink(filePath);
+    }
+    return { status: "error", error: err };
+  } finally {
+    if (cancelWatcher) clearInterval(cancelWatcher);
+    clearInterval(keepAliveTimer);
+  }
 }
 
 async function safeUnlink(filePath) {
@@ -1056,6 +1300,7 @@ app.get("/api/diag", async (_req, res) => {
       active: queue.activeCount,
       queued: queue.queuedCount,
       capacity: queue.capacity,
+      pending: ctx?.pendingAdds ? ctx.pendingAdds.size : 0,
     };
     sessionWorkerState[sid] = info;
     totalActive += info.active;
@@ -1323,7 +1568,12 @@ app.get("/api/add-progress/:token", (req, res) => {
   if (!entry) {
     return res.json({ progress: null, done: false });
   }
-  res.json({ progress: entry.value, done: entry.done });
+  res.json({
+    progress: entry.value,
+    done: entry.done,
+    status: entry.status ?? null,
+    message: entry.message ?? null,
+  });
 });
 
 
@@ -1354,227 +1604,58 @@ app.post("/api/add", async (req, res) => {
     console.error("[add] session error:", err?.message || err);
     return res.status(500).json({ error: "Session error" });
   }
+
   const playlistStore = ctx.playlist;
-  const requestSeq = playlistStore.issueSeq();
+  const token = typeof client_token === "string" && client_token.trim()
+    ? client_token.trim().slice(0, 80)
+    : `tmp_${Date.now()}_${nanoid(6)}`;
 
   console.log("[add] requested", {
     sessionId: ctx.id,
     url,
     quality: quality || null,
     formatId: format_id || null,
-    clientToken: client_token || null,
-    orderSeq: requestSeq,
+    clientToken: token,
   });
 
   const metaR = await getVideoMetaSmart(url);
   if (!metaR.ok || !metaR.meta?.duration) {
-    return res.status(400).json({ error: "Failed to read video metadata", detail: metaR.error, stderr: metaR.stderr });
-  }
-
-  if (client_token) {
-    setAddProgress(client_token, 0);
-  }
-
-  if (client_token && isAddCanceled(client_token)) {
-    clearCanceledToken(client_token);
-    markAddProgressDone(client_token, 0);
-    return res.json({ canceled: true, client_token });
-  }
-
-  let aborted = false;
-  req.on("aborted", () => {
-    aborted = true;
-    console.warn("[add] request aborted", {
-      sessionId: ctx.id,
-      clientToken: client_token || null,
+    console.error("[add] metadata error", metaR.error || metaR.stderr || "unknown");
+    return res.status(400).json({
+      error: "Failed to read video metadata",
+      detail: metaR.error,
+      stderr: metaR.stderr,
     });
-    if (client_token) {
-      markAddCanceled(client_token);
-      markAddProgressDone(client_token, 0);
-    }
+  }
+
+  const requestSeq = playlistStore.issueSeq();
+
+  console.log("[add] scheduled", {
+    sessionId: ctx.id,
+    orderSeq: requestSeq,
+    clientToken: token,
   });
 
-  const workerTask = async () => {
-    if (aborted) {
-      if (client_token) {
-        clearCanceledToken(client_token);
-        markAddProgressDone(client_token, 0);
-      }
-      return { status: "canceled" };
-    }
+  scheduleAddJob(ctx, {
+    url,
+    quality,
+    formatId: format_id || null,
+    clientToken: token,
+    usedClient: used_client || null,
+    extractorArgs: metaR.usedClient || used_client || "",
+    requestSeq,
+    meta: metaR.meta,
+  });
 
-    if (client_token && isAddCanceled(client_token)) {
-      clearCanceledToken(client_token);
-      markAddProgressDone(client_token, 0);
-      return { status: "canceled" };
-    }
-
-    ctx.lastAccess = Date.now();
-
-    const q = (quality || "").toLowerCase();
-    const audioQuality = (q === "320" || q === "320k") ? "320K" : "0"; // default V0
-    const args = [];
-    const keepAliveEvery = Math.max(30_000, Math.min(Math.floor(SESSION_COOKIE_MAX_AGE / 2), 120_000));
-    const keepAliveTimer = setInterval(() => {
-      ctx.lastAccess = Date.now();
-    }, keepAliveEvery);
-    keepAliveTimer.unref?.();
-
-    const clientArg = metaR.usedClient || used_client || "";
-    if (clientArg && clientArg.trim()) args.push("--extractor-args", clientArg);
-    if (COOKIES_PATH) args.push("--cookies", COOKIES_PATH);
-    if (YTDLP_EXTRA) args.push(...splitArgs(YTDLP_EXTRA));
-
-    const looksLikePath =
-      FF.bin && (FF.bin.startsWith("/") || FF.bin.includes("\\") || /^[A-Za-z]:\\/.test(FF.bin));
-    if (looksLikePath) args.push("--ffmpeg-location", FF.bin);
-
-    if (format_id) args.push("-f", String(format_id));
-
-    args.push(
-      "-x",
-      "--audio-format",
-      "mp3",
-      "--audio-quality",
-      audioQuality,
-      "--no-playlist",
-      "--restrict-filenames",
-      "-o",
-      path.join(ctx.trackDir, "%(title)s-%(id)s.%(ext)s"),
-      "--print",
-      "after_move:filepath",
-      "--newline",
-      url
-    );
-
-    let filePath = null;
-    try {
-      const proc = runYtDlp(args, { stdio: ["ignore", "pipe", "pipe"] });
-      let stdout = "";
-      let stderr = "";
-
-      proc.stdout?.on("data", (chunk) => {
-        const text = chunk.toString();
-        stdout += text;
-        if (client_token) updateProgressFromYtDlp(client_token, text, ctx);
-      });
-
-      proc.stderr?.on("data", (chunk) => {
-        const text = chunk.toString();
-        stderr += text;
-        if (client_token) updateProgressFromYtDlp(client_token, text, ctx);
-      });
-
-      const code = await new Promise((resolve) => {
-        proc.on("error", (err) => {
-          stderr += `\n${err?.message || err}`;
-          resolve(-1);
-        });
-        proc.on("close", (exitCode) => {
-          resolve(exitCode);
-        });
-      });
-
-      if (client_token) {
-        if (code === 0) {
-          markAddProgressDone(client_token);
-        } else {
-          markAddProgressDone(client_token, 0);
-        }
-      }
-
-      if (code !== 0) throw new Error(`yt-dlp exit ${code}: ${stderr}`);
-
-      filePath = stdout.trim().split(/\r?\n/).filter(Boolean).pop();
-      if (!filePath) {
-        throw new Error("Failed to determine output file path");
-      }
-      const stat = await fsp.stat(filePath);
-
-      if (client_token && isAddCanceled(client_token)) {
-        clearCanceledToken(client_token);
-        markAddProgressDone(client_token, 0);
-        await safeUnlink(filePath);
-        filePath = null;
-        return { status: "canceled" };
-      }
-
-      const item = {
-        id: nanoid(8),
-        title: metaR.meta.title || path.basename(filePath),
-        duration: Number(metaR.meta.duration) || 0,
-        filepath: filePath,
-        sizeBytes: stat.size,
-        videoId: metaR.meta.id || null,
-        thumbnail: pickThumbnail(metaR.meta) || null,
-      };
-      const stored = playlistStore.add(item, requestSeq);
-      ctx.lastAccess = Date.now();
-      clearCanceledToken(client_token);
-      console.log("[add] completed", {
-        sessionId: ctx.id,
-        itemId: stored.id,
-        title: stored.title,
-        duration: stored.duration,
-        sizeBytes: stored.sizeBytes,
-        orderSeq: stored.orderSeq,
-      });
-      return {
-        status: "success",
-        payload: {
-          item: {
-            id: stored.id,
-            title: stored.title,
-            duration: stored.duration,
-            sizeBytes: stored.sizeBytes,
-            videoId: stored.videoId,
-            thumbnail: stored.thumbnail,
-            order: stored.orderSeq,
-          },
-          totalSeconds: playlistStore.totalSeconds,
-          capSeconds: playlistStore.capSeconds,
-          client_token,
-        },
-      };
-    } catch (err) {
-      if (filePath) await safeUnlink(filePath);
-      throw err;
-    } finally {
-      clearInterval(keepAliveTimer);
-    }
-  };
-
-  let outcome;
-  try {
-    outcome = await ctx.addQueue.run(workerTask, {
-      sessionId: ctx.id,
-      token: client_token || null,
-      orderSeq: requestSeq,
-    });
-  } catch (e) {
-    clearCanceledToken(client_token);
-    if (client_token) {
-      markAddProgressDone(client_token, 0);
-    }
-    console.error("[add] error:", e?.message || e);
-    if (!aborted && !res.headersSent) {
-      res.status(500).json({ error: "Convert failed", message: String(e?.message || e) });
-    }
-    return;
-  }
-
-  if (aborted) {
-    return;
-  }
-
-  if (!outcome || outcome.status === "canceled") {
-    if (!res.headersSent) {
-      res.json({ canceled: true, client_token });
-    }
-    return;
-  }
-
-  res.json(outcome.payload);
+  res.status(202).json({
+    accepted: true,
+    client_token: token,
+    order: requestSeq,
+    title: metaR.meta?.title || null,
+    duration: Number(metaR.meta?.duration) || null,
+    thumbnail: pickThumbnail(metaR.meta) || null,
+    usedClient: metaR.usedClient || used_client || null,
+  });
 });
 
 // One-off conversion endpoint (MP3 or WAV) that prepares a download link
