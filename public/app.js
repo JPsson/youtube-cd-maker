@@ -850,6 +850,49 @@ function describeFormat(bf) {
   return parts.join(" · ");
 }
 
+function triggerBrowserDownload(href) {
+  if (!href) return false;
+  let url;
+  try {
+    url = new URL(href, window.location.origin).toString();
+  } catch (err) {
+    url = href;
+  }
+
+  const iframe = document.createElement("iframe");
+  iframe.src = url;
+  iframe.style.display = "none";
+  iframe.setAttribute("aria-hidden", "true");
+
+  let cleanupTimer = null;
+
+  const cleanup = () => {
+    if (cleanupTimer) {
+      clearTimeout(cleanupTimer);
+      cleanupTimer = null;
+    }
+    setTimeout(() => {
+      if (iframe.parentNode) {
+        iframe.remove();
+      }
+    }, 1000);
+  };
+
+  iframe.addEventListener("load", cleanup, { once: true });
+  iframe.addEventListener("error", () => {
+    cleanup();
+    try {
+      window.location.assign(url);
+    } catch {
+      window.location.href = url;
+    }
+  }, { once: true });
+
+  cleanupTimer = setTimeout(cleanup, 60_000);
+  document.body.appendChild(iframe);
+  return true;
+}
+
 async function oneOffDownload(target) {
   const url = dom.url.value.trim();
   if (!url) return;
@@ -947,15 +990,13 @@ async function oneOffDownload(target) {
       return;
     }
 
-    const cd = r.headers.get("Content-Disposition") || "";
-    const fn = /filename="([^"]+)"/.exec(cd)?.[1] || `audio.${target}`;
-    const blob = await r.blob();
-    const href = URL.createObjectURL(blob);
-    const a = Object.assign(document.createElement("a"), { href, download: fn });
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(href);
+    const result = await r.json().catch(() => null);
+    const href = result?.href;
+    if (!result?.ok || !href) {
+      setPickedNoteError(result?.message || "Download link was not provided.");
+      return;
+    }
+    triggerBrowserDownload(href);
   } catch (e) {
     setPickedNoteError(`Network error: ${e.message || e}`);
   } finally {
@@ -976,21 +1017,19 @@ async function handleZipDownload() {
   dotsAnimator.start();
 
   try {
-    const r = await fetch("/api/zip");
+    const r = await fetch("/api/zip", { method: "POST" });
     if (!r.ok) {
       const txt = await r.text();
       setPickedNoteError(`Failed to create ZIP: ${txt || r.statusText}`);
       return;
     }
-    const cd = r.headers.get("Content-Disposition") || "";
-    const fn = /filename="([^"]+)"/.exec(cd)?.[1] || "cd-collection.zip";
-    const blob = await r.blob();
-    const href = URL.createObjectURL(blob);
-    const a = Object.assign(document.createElement("a"), { href, download: fn });
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(href);
+    const result = await r.json().catch(() => null);
+    const href = result?.href;
+    if (!result?.ok || !href) {
+      setPickedNoteError(result?.message || "Failed to prepare ZIP download.");
+      return;
+    }
+    triggerBrowserDownload(href);
   } catch (e) {
     setPickedNoteError(`Failed to create ZIP: ${e.message || e}`);
   } finally {
